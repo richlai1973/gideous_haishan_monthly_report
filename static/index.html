@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>基甸會海山支會 · 月例會報告產出</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --ink:#1b2430; --mute:#6b7684;
+    --brand:#1f4e79; --brand-2:#2e6ca4; --ok:#1f7a4d; --warn:#b4690e; --err:#b3261e;
+    --chip:#eef3f8;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.6 -apple-system,"PingFang TC","Noto Sans TC",sans-serif}
+  header{background:var(--brand);color:#fff;padding:14px 22px;
+         display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  header h1{font-size:17px;margin:0;font-weight:600;letter-spacing:.5px}
+  header .sub{font-size:12px;opacity:.8}
+  .wrap{max-width:1180px;margin:0 auto;padding:20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+        padding:16px 18px;margin-bottom:16px}
+  .row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+  label{display:block;font-size:12px;color:var(--mute);margin-bottom:4px}
+  input,select{padding:7px 10px;border:1px solid var(--line);border-radius:6px;
+               font:inherit;background:#fff}
+  button{padding:8px 15px;border:0;border-radius:6px;background:var(--brand);
+         color:#fff;font:inherit;cursor:pointer}
+  button:hover{background:var(--brand-2)}
+  button.ghost{background:#fff;color:var(--brand);border:1px solid var(--brand)}
+  button.ghost:hover{background:var(--chip)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+        gap:10px;margin-top:14px}
+  .meta div{background:var(--chip);border-radius:8px;padding:8px 11px}
+  .meta b{display:block;font-size:11px;color:var(--mute);font-weight:500}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+  .tabs button{background:#fff;color:var(--ink);border:1px solid var(--line)}
+  .tabs button.on{background:var(--brand);color:#fff;border-color:var(--brand)}
+  .pane{display:none} .pane.on{display:block}
+  .drop{border:2px dashed var(--line);border-radius:10px;padding:24px;
+        text-align:center;color:var(--mute);cursor:pointer;background:#fbfcfd}
+  .drop.hot{border-color:var(--brand);background:var(--chip);color:var(--brand)}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+  th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left}
+  th{color:var(--mute);font-weight:600;font-size:12px}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+  .dot.g{background:var(--ok)} .dot.y{background:var(--warn)} .dot.r{background:var(--err)}
+  .dot.n{background:#c7ccd3}
+  pre{background:#0f172a;color:#cbd5e1;padding:12px;border-radius:8px;
+      overflow:auto;font-size:12px;max-height:280px}
+  .hint{font-size:12px;color:var(--mute)}
+  .stat{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+  .stat div{background:var(--chip);border-radius:8px;padding:10px 12px}
+  .stat b{display:block;font-size:20px;color:var(--brand)}
+  .stat span{font-size:11px;color:var(--mute)}
+  .log{font-size:12px;color:var(--mute);margin:2px 0 0 16px}
+  h3{margin:0 0 10px;font-size:14px}
+  .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .badge{font-size:11px;padding:2px 8px;border-radius:99px;background:var(--chip);
+         color:var(--mute)}
+  .badge.ok{background:#e6f4ec;color:var(--ok)}
+  .badge.warn{background:#fdf1e0;color:var(--warn)}
+  .badge.err{background:#fce9e7;color:var(--err)}
+</style>
+</head>
+<body>
+<header>
+  <h1>國際基甸會 海山支會 · 月例會報告產出系統</h1>
+  <span class="sub" id="hdr-sub"></span>
+</header>
+
+<div class="wrap">
+
+  <!-- 月份與總控 -->
+  <div class="card">
+    <div class="row">
+      <div><label>報告年</label><input id="year" type="number" style="width:92px"></div>
+      <div><label>報告月</label>
+        <select id="month">
+          <option value="1">1 月</option><option value="2">2 月</option>
+          <option value="3">3 月</option><option value="4">4 月</option>
+          <option value="5">5 月</option><option value="6">6 月</option>
+          <option value="7">7 月</option><option value="8">8 月</option>
+          <option value="9">9 月</option><option value="10">10 月</option>
+          <option value="11">11 月</option><option value="12">12 月</option>
+        </select></div>
+      <div><label>會議日期（第四個禮拜天）</label>
+        <input id="meeting" type="date" style="width:160px"></div>
+      <button id="btn-init">① 初始化 / 複製範本</button>
+      <button id="btn-gen" class="ghost">產生 10 份報告</button>
+      <span id="ready" class="badge">—</span>
+    </div>
+    <div class="meta" id="meta"></div>
+  </div>
+
+  <!-- 五大模組 -->
+  <div class="card">
+    <div class="tabs" id="tabs">
+      <button data-p="p1" class="on">① 產生報告</button>
+      <button data-p="p2">② 行政財務</button>
+      <button data-p="p3">③ LINE 與贈經</button>
+      <button data-p="p4">④ 代禱</button>
+      <button data-p="p5">⑤ 其他 / 增量</button>
+      <button data-p="p6">📊 成果表分析</button>
+    </div>
+
+    <div class="pane on" id="p1">
+      <h3>① 產生 X 月報告</h3>
+      <p class="hint">以上月 10 份 docx 為範本複製並重新命名，日期依「先具體後通用」順序替換。
+        範本月份、財年皆自動推導。</p>
+      <div class="bar">
+        <a id="dash-link" href="#" target="_blank"><button class="ghost">開啟最新年度 Grafana Dashboard</button></a>
+        <span class="hint">登入後匯出 Excel，再到「② 行政財務」上傳</span>
+      </div>
+      <div id="p1-out"></div>
+    </div>
+
+    <div class="pane" id="p2">
+      <h3>② 行政財務 <span class="badge">→ -2 -3 -4 -9</span></h3>
+      <p class="hint">事工成果表 Excel、現金帳、收支表。支援 xlsx / csv / pdf / txt。</p>
+      <div class="drop" data-mod="finance">拖曳或點擊上傳檔案</div>
+      <div id="out-finance"></div>
+    </div>
+
+    <div class="pane" id="p3">
+      <h3>③ LINE 文字與贈經 <span class="badge">→ -1 -5 -6</span></h3>
+      <p class="hint">LINE 匯出文字、贈經名單／照片。系統自動擷取年度主題、贈經排程、禱告會輪值。</p>
+      <div class="drop" data-mod="line">拖曳或點擊上傳檔案</div>
+      <div id="out-line"></div>
+    </div>
+
+    <div class="pane" id="p4">
+      <h3>④ 代禱文件 <span class="badge">→ -7</span></h3>
+      <p class="hint">代禱會影像或文字。影像需多模態辨識，結果一律先確認再寫入。</p>
+      <div class="drop" data-mod="prayer">拖曳或點擊上傳檔案</div>
+      <div id="out-prayer"></div>
+    </div>
+
+    <div class="pane" id="p5">
+      <h3>⑤ 其他 / 增量更新 <span class="badge">→ -1 -5 -8</span></h3>
+      <p class="hint">贈經排程、臨時動議、輪值調整。只重繪受影響文件，不覆蓋已人工編輯內容。</p>
+      <div class="drop" data-mod="other">拖曳或點擊上傳檔案</div>
+      <div id="out-other"></div>
+    </div>
+
+    <div class="pane" id="p6">
+      <h3>📊 事工成果表分析</h3>
+      <p class="hint">解析已上傳的事工成果表 Excel，檢視會費繳交、奉獻、教會見證彙總。</p>
+      <button id="btn-analysis" class="ghost">重新分析</button>
+      <div id="out-analysis"></div>
+    </div>
+  </div>
+
+  <!-- 產出結果 -->
+  <div class="card">
+    <h3>產出結果</h3>
+    <div class="bar">
+      <button id="btn-zip" class="ghost">下載 ZIP</button>
+      <button id="btn-drive">上傳 Google Drive（覆寫）</button>
+      <button id="btn-auth" class="ghost">連結 Google Drive</button>
+      <span id="drive-state" class="badge">—</span>
+    </div>
+    <div id="files"></div>
+    <div id="drive-out"></div>
+  </div>
+
+  <p class="hint" id="footer"></p>
+</div>
+
+<input type="file" id="picker" style="display:none" multiple>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = async (path, opts) => {
+  const r = await fetch(path, opts);
+  const t = await r.text();
+  let j; try { j = JSON.parse(t); } catch { j = { detail: t }; }
+  if (!r.ok) throw new Error(j.detail || r.statusText);
+  return j;
+};
+const Y = () => +$('#year').value, M = () => +$('#month').value;
+const fmt = n => (n ?? 0).toLocaleString('zh-TW');
+let STATE = null, pendingModule = null;
+
+// ── 分頁 ──────────────────────────────────────────────
+$('#tabs').onclick = e => {
+  const b = e.target.closest('button'); if (!b) return;
+  document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.id === b.dataset.p));
+  if (b.dataset.p === 'p6') loadAnalysis();
+};
+
+// ── 狀態 ──────────────────────────────────────────────
+async function refresh() {
+  const s = await api(`/api/status?year=${Y()}&month=${M()}`);
+  STATE = s; const m = s.meta;
+  $('#hdr-sub').textContent =
+    `民國 ${m.roc_year} 年 ${m.report_month} 月 · 財年 ${m.period} · 範本 ${m.prev_year}年${m.prev_month}月`;
+  if (!$('#meeting').value) $('#meeting').value = m.meeting_date;
+  $('#dash-link').href = s.dashboard_url;
+
+  $('#meta').innerHTML = `
+    <div><b>會議日期</b>${m.meeting_date}</div>
+    <div><b>下次月例會</b>${m.next_meeting_date}</div>
+    <div><b>財年 (var-year)</b>${m.fiscal_year}</div>
+    <div><b>範本資料夾</b>${s.template_exists ? '✅ 已就緒' : '⚠️ 不存在'}</div>
+    <div><b>工作資料夾</b>${s.work_dir_exists ? '✅ ' + m.work_dir_name : '尚未建立'}</div>
+    <div><b>年度贈經計畫</b>${s.distribution_plan.exists ? '✅ ' + m.period : '⚠️ 待上傳'}</div>
+    <div><b>Drive 目標</b>${m.drive_folder_name}</div>`;
+
+  $('#ready').textContent = s.ready ? `● ${s.ready} 份就緒` : '尚未產生';
+  $('#ready').className = 'badge ' + (s.ready === 10 ? 'ok' : s.ready ? 'warn' : '');
+
+  $('#files').innerHTML = s.files.length ? `<table><tr><th>#</th><th>檔案</th><th>更新時間</th><th></th></tr>` +
+    s.files.map(f => `<tr><td>${f.num}</td><td><span class="dot g"></span>${f.name}</td>
+      <td>${new Date(f.mtime * 1000).toLocaleString('zh-TW')}</td>
+      <td><a href="/api/download?year=${Y()}&month=${M()}&name=${encodeURIComponent(f.name)}">下載</a></td></tr>`).join('')
+    + '</table>' : '<p class="hint">尚未產生任何檔案。</p>';
+
+  const d = s.drive;
+  $('#drive-state').textContent = d.authorized ? '✅ 已授權'
+    : d.client_secret_present ? '⚠️ 待授權' : '⚠️ 缺 client_secret.json';
+  $('#drive-state').className = 'badge ' + (d.authorized ? 'ok' : 'warn');
+  $('#footer').textContent = `本機資料夾：${s.base_dir}　支援格式：${s.supported_ext.join(' ')}`;
+}
+
+// ── 動作 ──────────────────────────────────────────────
+$('#btn-init').onclick = async () => {
+  const r = await api('/api/init', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ year: Y(), month: M(), meeting_date: $('#meeting').value })
+  }).catch(e => ({ error: e.message }));
+  $('#p1-out').innerHTML = r.error
+    ? `<p class="badge err">${r.error}</p>`
+    : `<p class="badge ok">已建立 ${r.files.length} 份於 ${r.work_dir}</p>` +
+      (r.missing.length ? `<p class="badge warn">範本缺少：${r.missing.join('、')}</p>` : '');
+  refresh();
+};
+
+$('#btn-gen').onclick = async (e) => {
+  e.target.disabled = true; e.target.textContent = '產生中…';
+  try {
+    const r = await api('/api/generate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ year: Y(), month: M(), meeting_date: $('#meeting').value })
+    });
+    $('#p1-out').innerHTML = '<table><tr><th>#</th><th>文件</th><th>狀態</th><th>變更</th></tr>' +
+      r.results.map(x => `<tr>
+        <td>${x.num}</td><td>${x.file}</td>
+        <td><span class="dot ${x.status === 'ok' ? (x.data_updated ? 'g' : 'y') : 'r'}"></span>
+            ${x.data_updated ? '數據已更新' : '僅更新日期'}</td>
+        <td>${[...x.date_changes, ...x.notes].map(n => `<div class="log">• ${n}</div>`).join('') || '—'}</td>
+      </tr>`).join('') + '</table>';
+  } catch (err) { $('#p1-out').innerHTML = `<p class="badge err">${err.message}</p>`; }
+  e.target.disabled = false; e.target.textContent = '產生 10 份報告';
+  refresh();
+};
+
+// ── 上傳 ──────────────────────────────────────────────
+document.querySelectorAll('.drop').forEach(d => {
+  d.onclick = () => { pendingModule = d.dataset.mod; $('#picker').click(); };
+  d.ondragover = e => { e.preventDefault(); d.classList.add('hot'); };
+  d.ondragleave = () => d.classList.remove('hot');
+  d.ondrop = e => { e.preventDefault(); d.classList.remove('hot');
+                    upload(d.dataset.mod, e.dataTransfer.files); };
+});
+$('#picker').onchange = e => { upload(pendingModule, e.target.files); e.target.value = ''; };
+
+async function upload(mod, files) {
+  const out = $('#out-' + mod);
+  for (const f of files) {
+    out.insertAdjacentHTML('beforeend', `<p class="hint">上傳 ${f.name}…</p>`);
+    const fd = new FormData();
+    fd.append('module', mod); fd.append('year', Y());
+    fd.append('month', M()); fd.append('file', f);
+    try {
+      const r = await api('/api/parse', { method: 'POST', body: fd });
+      out.insertAdjacentHTML('beforeend', renderParse(mod, r));
+    } catch (err) {
+      out.insertAdjacentHTML('beforeend', `<p class="badge err">${f.name}：${err.message}</p>`);
+    }
+  }
+}
+
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+function renderParse(mod, r) {
+  const hasExtract = r.data.extracted && Object.keys(r.data.extracted).length;
+  const patch = hasExtract ? r.data.extracted
+              : (r.kind === 'ministry_excel' ? r.data : null);
+  const id = 'c' + Math.random().toString(36).slice(2);
+  window[id] = { mod, patch, source: r.file };
+
+  // LINE 原始匯出：以當月訊息摘要呈現
+  let digest = '';
+  const dg = r.data.month_digest;
+  if (dg) {
+    digest = `<details open><summary>本月訊息 ${dg.messages.length} 則
+      （全檔 ${dg.total_days} 天${dg.range ? '，' + dg.range[0] + ' ~ ' + dg.range[1] : ''}）</summary>
+      <table><tr><th>日期</th><th>時間</th><th>發言者</th><th>內容</th></tr>` +
+      dg.messages.map(m => `<tr><td>${m.date}</td><td>${m.time}</td>
+        <td>${esc(m.who)}</td><td>${esc(m.text).slice(0, 120)}</td></tr>`).join('') +
+      `</table></details>`;
+  }
+
+  return `<div class="card" style="margin-top:12px">
+    <b>${esc(r.file)}</b> <span class="badge ${r.needs_review ? 'warn' : 'ok'}">${r.kind}</span>
+    <p>${esc(r.summary)}</p>
+    ${r.affected_docs?.length ? `<p class="hint">影響文件：${r.affected_docs.map(n => '-' + n).join(' ')}</p>` : ''}
+    ${digest}
+    ${patch ? `<pre>${esc(JSON.stringify(patch.analysis || patch, null, 2).slice(0, 2500))}</pre>
+      <button onclick="commit('${id}')">確認寫入資料模型</button>` :
+      '<p class="hint">此檔已收入 _inputs/。原始聊天記錄或影像需人工挑選／多模態辨識後再寫入。</p>'}
+  </div>`;
+}
+
+async function commit(id) {
+  const c = window[id];
+  try {
+    await api('/api/commit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ year: Y(), month: M(), module: c.mod,
+                             patch: c.patch, source: c.source })
+    });
+    alert('已寫入資料模型，可按「產生 10 份報告」套用。');
+    refresh();
+  } catch (e) { alert(e.message); }
+}
+
+// ── 分析 ──────────────────────────────────────────────
+$('#btn-analysis').onclick = loadAnalysis;
+async function loadAnalysis() {
+  const out = $('#out-analysis');
+  try {
+    const r = await api(`/api/analysis?year=${Y()}&month=${M()}`);
+    const a = r.analysis;
+    out.innerHTML = `
+      <div class="stat">
+        <div><b>${a.people}</b><span>會員（弟兄＋姊妹）</span></div>
+        <div><b>${a.fee_paid}</b><span>已繳會費（${a.fee_rate}%）</span></div>
+        <div><b>${fmt(a.bible_offering_total)}</b><span>聖經奉獻合計</span></div>
+        <div><b>${fmt(a.barnabas_total)}</b><span>巴拿巴奉獻</span></div>
+        <div><b>${a.church_count}</b><span>教會見證間數</span></div>
+        <div><b>${fmt(a.church_offering_total)}</b><span>教會奉獻合計</span></div>
+        <div><b>${fmt(a.scripture_total)}</b><span>贈經總數</span></div>
+        <div><b>${fmt(a.scripture_sister)}</b><span>姊妹贈經</span></div>
+      </div>
+      <h3 style="margin-top:16px">聖經奉獻前 10 名</h3>
+      <table><tr><th>姓名</th><th>性別</th><th>會費日期</th><th>聖經奉獻</th></tr>
+        ${a.top_bible_offering.map(o => `<tr><td>${o.name}</td>
+          <td>${o.gender === 'M' ? '弟兄' : '姊妹'}</td><td>${o.fee_date || '—'}</td>
+          <td>${fmt(o.bible_offering)}</td></tr>`).join('')}</table>
+      <h3 style="margin-top:16px">教會見證</h3>
+      <table><tr><th>日期</th><th>教會</th><th>講員</th><th>金額</th></tr>
+        ${r.churches.map(c => `<tr><td>${c.date || '—'}</td><td>${c.church}</td>
+          <td>${c.speaker || '—'}</td><td>${fmt(c.amount)}</td></tr>`).join('')}</table>
+      ${a.unpaid_members.length ? `<h3 style="margin-top:16px">尚未繳會費（${a.unpaid_members.length}）</h3>
+        <p class="hint">${a.unpaid_members.join('、')}</p>` : ''}`;
+  } catch (e) { out.innerHTML = `<p class="badge warn">${e.message}</p>`; }
+}
+
+// ── 下載 / Drive ──────────────────────────────────────
+$('#btn-zip').onclick = () => location.href = `/api/download?year=${Y()}&month=${M()}`;
+
+$('#btn-auth').onclick = async () => {
+  $('#drive-out').innerHTML = '<p class="hint">已開啟瀏覽器授權視窗，請完成 Google 登入…</p>';
+  try { await api('/api/drive/authorize', { method: 'POST' });
+        $('#drive-out').innerHTML = '<p class="badge ok">Google Drive 已授權</p>'; }
+  catch (e) { $('#drive-out').innerHTML = `<p class="badge err">${e.message}</p>`; }
+  refresh();
+};
+
+$('#btn-drive').onclick = async (e) => {
+  e.target.disabled = true; e.target.textContent = '上傳中…';
+  try {
+    const r = await api('/api/drive/upload', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ year: Y(), month: M(), include_excel: true })
+    });
+    $('#drive-out').innerHTML =
+      `<p class="badge ok">資料夾「${r.folder.name}」${r.folder.created ? '已建立' : '已存在'}
+        <a href="${r.folder.url}" target="_blank">在 Drive 開啟</a></p>
+      <table><tr><th>檔案</th><th>結果</th><th></th></tr>` +
+      r.uploaded.map(f => `<tr><td>${f.name}</td>
+        <td><span class="badge ok">${f.action === 'overwritten' ? '覆寫' : '新建'}</span></td>
+        <td><a href="${f.url}" target="_blank">開啟</a></td></tr>`).join('') +
+      r.errors.map(f => `<tr><td>${f.file}</td><td><span class="badge err">失敗</span></td>
+        <td>${f.error}</td></tr>`).join('') + '</table>';
+  } catch (err) { $('#drive-out').innerHTML = `<p class="badge err">${err.message}</p>`; }
+  e.target.disabled = false; e.target.textContent = '上傳 Google Drive（覆寫）';
+};
+
+// ── 初始化 ────────────────────────────────────────────
+(async () => {
+  const now = new Date();
+  $('#year').value = now.getFullYear();
+  $('#month').value = now.getMonth() + 1;
+  $('#year').onchange = $('#month').onchange = () => { $('#meeting').value = ''; refresh(); };
+  await refresh();
+})();
+</script>
+</body>
+</html>

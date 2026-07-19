@@ -1,0 +1,278 @@
+"""基甸會海山支會 月例會報告產出系統 — FastAPI 後端 + 單頁前端。
+
+啟動：
+    pip install -r requirements.txt
+    python app.py            # → http://127.0.0.1:8848
+"""
+
+from __future__ import annotations
+
+import io
+import os
+import shutil
+import zipfile
+from datetime import date
+from pathlib import Path
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from engine import generate as gen
+from engine.dates import build_meta, dashboard_url, default_report_month, latest_fiscal_year
+from engine.drive import DEFAULT_PARENT_ID, DriveClient, DriveNotConfigured
+from engine.parse_files import SUPPORTED, parse_file
+from models.model import AFFECTED_DOCS, load_model, merge, save_model
+
+APP_DIR = Path(__file__).parent
+BASE_DIR = Path(os.environ.get("GIDEONS_BASE_DIR",
+                               Path.home() / "Documents" / "海山支會"))
+CRED_DIR = Path(os.environ.get("GIDEONS_CRED_DIR", APP_DIR / "credentials"))
+PLAN_DIR = Path(os.environ.get("GIDEONS_PLAN_DIR",
+                               APP_DIR.parent / "贈經計畫"))
+
+app = FastAPI(title="基甸會海山支會 月例會報告產出系統", version="1.0")
+drive = DriveClient(str(CRED_DIR), os.environ.get("GIDEONS_DRIVE_PARENT", DEFAULT_PARENT_ID))
+
+
+# ── 共用 ─────────────────────────────────────────────────
+def _meta(year: int, month: int, meeting_date: str | None = None):
+    return build_meta(year, month, meeting_date or None)
+
+
+def _work_dir(year: int, month: int) -> Path:
+    return BASE_DIR / f"{year}年{month}月月例會"
+
+
+def _docx_paths(work_dir: Path, meta) -> list[str]:
+    prefix = f"月例會議程{meta.roc_year}年{meta.report_month}月"
+    return sorted((str(p) for p in work_dir.glob(f"{prefix}-*.docx")),
+                  key=lambda p: gen.file_number(os.path.basename(p)))
+
+
+# ── API：狀態 ────────────────────────────────────────────
+@app.get("/api/status")
+def status(year: int | None = None, month: int | None = None):
+    y, m = (year, month) if year and month else default_report_month()
+    meta = _meta(y, m)
+    wd = _work_dir(y, m)
+    files = []
+    if wd.exists():
+        for p in _docx_paths(wd, meta):
+            files.append({"name": os.path.basename(p),
+                          "num": gen.file_number(os.path.basename(p)),
+                          "size": os.path.getsize(p),
+                          "mtime": os.path.getmtime(p)})
+    plan = PLAN_DIR / f"{meta.period}_聖經配送計畫.xlsx"
+    return {
+        "meta": meta.to_dict(),
+        "base_dir": str(BASE_DIR),
+        "base_dir_exists": BASE_DIR.exists(),
+        "work_dir": str(wd),
+        "work_dir_exists": wd.exists(),
+        "template_dir": str(BASE_DIR / f"{meta.prev_year}年{meta.prev_month}月月例會"),
+        "template_exists": (BASE_DIR / f"{meta.prev_year}年{meta.prev_month}月月例會").exists(),
+        "files": files,
+        "ready": len(files),
+        "latest_fiscal_year": latest_fiscal_year(),
+        "dashboard_url": dashboard_url(meta.fiscal_year),
+        "distribution_plan": {"path": str(plan), "exists": plan.exists(),
+                              "period": meta.period},
+        "drive": drive.status(),
+        "model": load_model(str(wd)) if wd.exists() else None,
+        "supported_ext": sorted(SUPPORTED),
+    }
+
+
+# ── API：① 初始化當月 ────────────────────────────────────
+class InitReq(BaseModel):
+    year: int
+    month: int
+    meeting_date: str | None = None
+
+
+@app.post("/api/init")
+def api_init(req: InitReq):
+    meta = _meta(req.year, req.month, req.meeting_date)
+    res = gen.init_month(str(BASE_DIR), meta)
+    if not res["ok"]:
+        raise HTTPException(400, res["error"])
+    model = load_model(res["work_dir"])
+    model["meta"] = meta.to_dict()
+    save_model(res["work_dir"], model)
+    res["meta"] = meta.to_dict()
+    return res
+
+
+# ── API：解析上傳檔（先看結果，確認才寫入）──────────────
+@app.post("/api/parse")
+async def api_parse(module: str = Form(...), year: int = Form(...),
+                    month: int = Form(...), file: UploadFile = File(...)):
+    meta = _meta(year, month)
+    wd = _work_dir(year, month)
+    inputs = wd / "_inputs"
+    inputs.mkdir(parents=True, exist_ok=True)
+
+    dest = inputs / file.filename
+    with open(dest, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    ext = dest.suffix.lower()
+    if ext not in SUPPORTED:
+        raise HTTPException(400, f"不支援的格式：{ext}")
+
+    result = parse_file(str(dest), module, meta.report_year, meta.report_month)
+    result["module"] = module
+    result["saved_to"] = str(dest)
+    result["affected_docs"] = AFFECTED_DOCS.get(module, [])
+
+    # 事工成果表另存標準檔名，供產出時引用
+    if result["kind"] == "ministry_excel":
+        std = wd / f"事工成果表_{year}_{month:02d}.xlsx"
+        shutil.copy2(dest, std)
+        result["standard_excel"] = str(std)
+    return result
+
+
+# ── API：確認後寫入資料模型 ──────────────────────────────
+class CommitReq(BaseModel):
+    year: int
+    month: int
+    module: str
+    patch: dict
+    source: str = ""
+
+
+@app.post("/api/commit")
+def api_commit(req: CommitReq):
+    wd = _work_dir(req.year, req.month)
+    if not wd.exists():
+        raise HTTPException(400, "尚未初始化當月工作區，請先按「產生報告」")
+    model = load_model(str(wd))
+    merge(model, req.patch, req.source or req.module)
+    save_model(str(wd), model)
+    return {"ok": True, "model": model,
+            "affected_docs": AFFECTED_DOCS.get(req.module, [])}
+
+
+# ── API：產出 10 份 docx ─────────────────────────────────
+class GenReq(BaseModel):
+    year: int
+    month: int
+    meeting_date: str | None = None
+    only: list[int] | None = None      # 增量更新：只重繪指定文件編號
+
+
+@app.post("/api/generate")
+def api_generate(req: GenReq):
+    meta = _meta(req.year, req.month, req.meeting_date)
+    wd = _work_dir(req.year, req.month)
+    if not wd.exists():
+        init = gen.init_month(str(BASE_DIR), meta)
+        if not init["ok"]:
+            raise HTTPException(400, init["error"])
+
+    model = load_model(str(wd))
+    excel = wd / f"事工成果表_{req.year}_{req.month:02d}.xlsx"
+    res = gen.generate_all(str(wd), meta, str(excel) if excel.exists() else None, model)
+    if not res["ok"]:
+        raise HTTPException(400, res["error"])
+    if req.only:
+        res["results"] = [r for r in res["results"] if r["num"] in req.only]
+    res["meta"] = meta.to_dict()
+    return res
+
+
+# ── API：分析檢視（事工成果表）──────────────────────────
+@app.get("/api/analysis")
+def api_analysis(year: int, month: int):
+    wd = _work_dir(year, month)
+    excel = wd / f"事工成果表_{year}_{month:02d}.xlsx"
+    if not excel.exists():
+        raise HTTPException(404, "尚未上傳事工成果表 Excel")
+    from engine.parse_excel import MinistryExcel
+    mx = MinistryExcel(str(excel))
+    return {"file": excel.name, "analysis": mx.analysis(),
+            "offerings": mx.offerings(), "churches": mx.churches()}
+
+
+# ── API：下載 ────────────────────────────────────────────
+@app.get("/api/download")
+def api_download(year: int, month: int, name: str | None = None):
+    meta = _meta(year, month)
+    wd = _work_dir(year, month)
+    if name:
+        p = wd / name
+        if not p.exists():
+            raise HTTPException(404, "檔案不存在")
+        return FileResponse(str(p), filename=name)
+
+    paths = _docx_paths(wd, meta)
+    if not paths:
+        raise HTTPException(404, "尚無產出檔案")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in paths:
+            z.write(p, os.path.basename(p))
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/zip",
+        headers={"Content-Disposition":
+                 f'attachment; filename="gideons-{year}-{month:02d}.zip"'})
+
+
+# ── API：Google Drive ────────────────────────────────────
+@app.get("/api/drive/status")
+def drive_status():
+    return drive.status()
+
+
+@app.post("/api/drive/authorize")
+def drive_authorize():
+    try:
+        drive.authorize(interactive=True)
+    except DriveNotConfigured as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True, **drive.status()}
+
+
+class UploadReq(BaseModel):
+    year: int
+    month: int
+    include_excel: bool = True
+
+
+@app.post("/api/drive/upload")
+def drive_upload(req: UploadReq):
+    meta = _meta(req.year, req.month)
+    wd = _work_dir(req.year, req.month)
+    paths = _docx_paths(wd, meta)
+    if not paths:
+        raise HTTPException(404, "尚無產出檔案可上傳")
+    if req.include_excel:
+        excel = wd / f"事工成果表_{req.year}_{req.month:02d}.xlsx"
+        if excel.exists():
+            paths.append(str(excel))
+    try:
+        res = drive.upload_month(paths, meta.drive_folder_name)
+    except DriveNotConfigured as exc:
+        raise HTTPException(400, str(exc))
+    return res
+
+
+# ── 前端 ─────────────────────────────────────────────────
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return (APP_DIR / "static" / "index.html").read_text(encoding="utf-8")
+
+
+if (APP_DIR / "static").exists():
+    app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    print(f"資料夾：{BASE_DIR}")
+    print("開啟 → http://127.0.0.1:8848")
+    uvicorn.run(app, host="127.0.0.1", port=8848)

@@ -1,0 +1,24 @@
+# 憑證與權杖 — 絕不進版控
+credentials/
+*.json
+!package.json
+token.json
+client_secret*.json
+
+# 產出與輸入資料（含個資、奉獻金額）
+_inputs/
+outputs/
+*.docx
+*.xlsx
+*.pdf
+!範本/**
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# macOS
+.DS_Store
