@@ -118,7 +118,23 @@
 
     <div class="pane" id="p2">
       <h3>② 行政財務 <span class="badge">→ -2 -3 -4 -9</span></h3>
-      <p class="hint">事工成果表 Excel、現金帳、收支表。支援 xlsx / csv / pdf / txt。</p>
+
+      <div class="card" style="background:#fbfcfd">
+        <b>事工成果 — 自動擷取</b>
+        <p class="hint">直接查 Grafana 資料來源，免登入、免手動匯出。
+          擷取後列出檢核與關鍵數字，<b>確認無誤再套用</b>。</p>
+        <div class="bar">
+          <button id="btn-fetch">擷取本財年資料</button>
+          <span class="hint">財年：</span>
+          <input id="fy" type="number" style="width:90px">
+        </div>
+        <p class="hint" style="margin-top:6px">
+          新財年的年度目標若尚未建檔，目標／差額／達成率會顯示「-」，
+          成果數字仍然正確。系統<b>不會</b>自動退回上一財年（那會寫入錯誤數字）。</p>
+        <div id="out-fetch"></div>
+      </div>
+
+      <p class="hint">其他財務檔案（現金帳、收支表）請上傳：xlsx / csv / pdf / txt。</p>
       <div class="drop" data-mod="finance">拖曳或點擊上傳檔案</div>
       <div id="out-finance"></div>
     </div>
@@ -328,6 +344,80 @@ async function commit(id) {
   } catch (e) { alert(e.message); }
 }
 
+// ── 自動下載成果表（下載 → 審閱 → 確認套用）──────────────
+let FETCHED = null;
+
+$('#btn-fetch').onclick = async (e) => {
+  e.target.disabled = true; e.target.textContent = '下載中…';
+  const out = $('#out-fetch');
+  try {
+    const r = await api('/api/grafana/fetch', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ year: Y(), month: M(),
+                             fiscal_year: +$('#fy').value || null,
+                             allow_fallback: $('#fallback').checked })
+    });
+    FETCHED = r;
+    const s = r.ministry_stats;
+    const cell = (rec, k) => {
+      if (!rec || rec[k] === null || rec[k] === undefined) return '-';
+      return k === 'rate' ? (rec[k] * 100).toFixed(0) + '%' : fmt(rec[k]);
+    };
+    out.innerHTML = `
+      ${r.warnings.map(w => `<p class="badge warn">⚠️ ${esc(w)}</p>`).join('')}
+      <p class="badge ${r.all_ok ? 'ok' : 'warn'}">
+        ${r.fiscal_year} 財年（${r.period}）· 來源：Grafana API</p>
+
+      <h3 style="margin-top:12px">檢核</h3>
+      <table><tr><th></th><th>項目</th><th>內容</th></tr>
+        ${r.checks.map(c => `<tr><td><span class="dot ${c.ok ? 'g' : 'y'}"></span></td>
+          <td>${esc(c.item)}</td><td>${esc(c.detail)}</td></tr>`).join('')}</table>
+
+      <h3 style="margin-top:12px">事工成果統計表 -2（請核對後再套用）</h3>
+      <table><tr><th>項目</th><th>目標</th><th>成果</th><th>差額</th><th>達成率</th></tr>
+        ${Object.keys(s).map(k => `<tr><td>${esc(k)}</td>
+          <td>${cell(s[k],'goal')}</td><td><b>${cell(s[k],'value')}</b></td>
+          <td>${cell(s[k],'diff')}</td><td>${cell(s[k],'rate')}</td></tr>`).join('')}</table>
+
+      <h3 style="margin-top:12px">教會見證（${r.church_testimony.length} 場）</h3>
+      <table><tr><th>日期</th><th>教會</th><th>講員</th><th>奉獻</th></tr>
+        ${r.church_testimony.map(c => `<tr><td>${esc(c.date)}</td><td>${esc(c.church)}</td>
+          <td>${esc(c.speaker)}</td><td>${c.amount ? fmt(c.amount) : '-'}</td></tr>`).join('')}</table>
+
+      <h3 style="margin-top:12px">會費繳納（${r.counts['會費筆數']} 筆）</h3>
+      <table><tr><th>日期</th><th>姓名</th><th>性別</th><th>金額</th></tr>
+        ${r.membership_fees.map(f => `<tr><td>${esc(f.date)}</td><td>${esc(f.name)}</td>
+          <td>${f.gender === 'M' ? '弟兄' : '姊妹'}</td><td>${fmt(f.amount)}</td></tr>`).join('')}</table>
+
+      <div class="bar" style="margin-top:14px">
+        <button onclick="applyFetched()">✓ 確認並套用到報告</button>
+        <button class="ghost" onclick="$('#out-fetch').innerHTML=''; FETCHED=null">取消</button>
+        <a href="${r.dashboard_url}" target="_blank" class="hint">在 Dashboard 核對</a>
+        <span class="hint">${r.excel_available
+          ? '此年度亦可下載 Excel 報表' : 'Excel 報表此年度無法產生（年度目標未建檔）'}</span>
+      </div>`;
+  } catch (err) {
+    out.innerHTML = `<p class="badge err">${esc(err.message)}</p>
+      <p class="hint">若持續失敗，可改用手動匯出後從下方上傳。</p>`;
+  }
+  e.target.disabled = false; e.target.textContent = '從 Dashboard 下載成果表';
+};
+
+async function applyFetched() {
+  if (!FETCHED) return;
+  try {
+    await api('/api/commit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ year: Y(), month: M(), module: 'finance',
+                             patch: FETCHED.patch,
+                             source: `grafana-api:FY${FETCHED.fiscal_year}` })
+    });
+    $('#out-fetch').insertAdjacentHTML('beforeend',
+      '<p class="badge ok">已套用，可按上方「產生 10 份報告」。</p>');
+    refresh();
+  } catch (e) { alert(e.message); }
+}
+
 // ── 分析 ──────────────────────────────────────────────
 $('#btn-analysis').onclick = loadAnalysis;
 async function loadAnalysis() {
@@ -398,6 +488,7 @@ $('#btn-drive').onclick = async (e) => {
   $('#month').value = now.getMonth() + 1;
   $('#year').onchange = $('#month').onchange = () => { $('#meeting').value = ''; refresh(); };
   await refresh();
+  $('#fy').value = STATE.meta.fiscal_year;
 })();
 </script>
 </body>

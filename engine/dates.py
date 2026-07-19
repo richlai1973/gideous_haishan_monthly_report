@@ -119,6 +119,7 @@ def build_meta(year: int, month: int, meeting_date: str | None = None) -> Meta:
         prev_meeting_date=fourth_sunday(py, pm).isoformat(),
         period=f"{fy - 1}-{fy}",
         work_dir_name=f"{year}年{month}月月例會",
-        drive_folder_name=f"{year}年{month}月",
+        # Drive 既有資料夾為零補位兩位數（2026年06月），與本機資料夾命名不同
+        drive_folder_name=f"{year}年{month:02d}月",
         dashboard_url=dashboard_url(fy),
     )

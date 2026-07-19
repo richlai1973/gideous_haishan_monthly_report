@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.dates import (build_meta, default_report_month, fiscal_year_of,
                           fourth_sunday, roc_year, template_month)
+from engine import grafana
 from engine.generate import _church_key, _fmt_stat, _match_church
 from engine.parse_files import filter_month, parse_line_text, split_by_day
 
@@ -38,7 +39,9 @@ def test_build_meta():
     assert (m.roc_year, m.prev_month, m.fiscal_year) == (115, 6, 2027)
     assert m.meeting_date == "2026-07-26"
     assert m.period == "2026-2027"
-    assert m.drive_folder_name == "2026年7月"
+    # Drive 既有資料夾為零補位（2026年06月），與本機 2026年7月月例會 不同
+    assert m.drive_folder_name == "2026年07月"
+    assert m.work_dir_name == "2026年7月月例會"
     assert "var-year=2027" in m.dashboard_url
 
 
@@ -67,6 +70,46 @@ def test_match_church():
     c, how = _match_church("板城靈糧堂教會", chs)
     assert how == "fuzzy" and c["amount"] == 13300
     assert _match_church("完全不存在的教會", chs)[0] is None
+
+
+def test_match_church_partial():
+    """實際資料：docx 寫「樹林愛加倍教會」，DB 寫「愛加倍浸信會」。"""
+    chs = [{"church": "愛加倍浸信會", "amount": 0, "date": None, "speaker": None}]
+    c, how = _match_church("樹林愛加倍教會", chs)
+    assert how == "partial" and c["church"] == "愛加倍浸信會"
+    # 共同字串太短不應誤配
+    assert _match_church("三峽真道教會", chs)[0] is None
+
+
+# ── Grafana ──────────────────────────────────────────────
+def test_fiscal_range():
+    assert grafana.fiscal_range(2027) == ("2026-06-01", "2027-05-31")
+    assert grafana.fiscal_range(2026) == ("2025-06-01", "2026-05-31")
+
+
+def test_ministry_categories_cover_docx_columns():
+    """-2 表 1~10 欄都要有對應的 category。"""
+    assert sorted(grafana.MINISTRY_CATEGORIES) == list(range(1, 11))
+    assert grafana.MINISTRY_CATEGORIES[7] == "教會聖奉"
+
+
+def test_excel_fallback_off_by_default():
+    """回退年度會寫入上一財年的錯誤數字，預設必須關閉。"""
+    import inspect
+    sig = inspect.signature(grafana.fetch_excel)
+    assert sig.parameters["allow_fallback"].default is False
+
+
+def test_api_stats_shape():
+    """ministry_stats 需算出 diff/rate；目標未設定時為 None。"""
+    grafana.query = lambda sql, fy: [
+        {"category": "弟兄會費", "goal": None, "value": 3},
+        {"category": "教會聖奉", "goal": 80000, "value": 6400},
+    ]
+    s = grafana.ministry_stats(2027)
+    assert s["弟兄會費"] == {"goal": None, "value": 3, "diff": None, "rate": None}
+    assert s["教會聖奉"]["diff"] == -73600
+    assert round(s["教會聖奉"]["rate"], 3) == 0.08
 
 
 # ── LINE 解析 ────────────────────────────────────────────

@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from engine import generate as gen
+from engine import grafana
 from engine.dates import build_meta, dashboard_url, default_report_month, latest_fiscal_year
 from engine.drive import DEFAULT_PARENT_ID, DriveClient, DriveNotConfigured
 from engine.parse_files import SUPPORTED, parse_file
@@ -133,6 +134,95 @@ async def api_parse(module: str = Form(...), year: int = Form(...),
         shutil.copy2(dest, std)
         result["standard_excel"] = str(std)
     return result
+
+
+# ── API：自動下載 Grafana 事工成果表（只下載＋解析，不寫入）──
+class FetchReq(BaseModel):
+    year: int
+    month: int
+    team: str = grafana.DEFAULT_TEAM
+    fiscal_year: int | None = None      # 可覆寫（補做舊年度）
+    # ⚠️ 預設 False：回退年度會取到上一財年的數字，寫進本月報告就是錯的
+    allow_fallback: bool = False
+
+
+@app.post("/api/grafana/fetch")
+def api_grafana_fetch(req: FetchReq):
+    """從 Grafana 擷取本財年資料（免登入），回傳供審閱。
+
+    預設走 **API 查詢**：任何年度都可用，包含目標尚未設定的新財年。
+    此端點**不會**寫入資料模型或改動任何 docx；
+    承辦人在介面確認數字無誤後，再按「確認並套用」走 /api/commit。
+    """
+    meta = _meta(req.year, req.month)
+    fy = req.fiscal_year or meta.fiscal_year
+
+    try:
+        res = grafana.fetch_all(fy, req.team)
+    except grafana.GrafanaError as exc:
+        raise HTTPException(502, str(exc))
+
+    stats = res["ministry_stats"]
+    checks = [
+        {"item": "連線 Grafana API", "ok": True, "detail": "免登入查詢成功"},
+        {"item": "財年區間", "ok": True, "detail": res["period"]},
+        {"item": "成果項目", "ok": bool(stats),
+         "detail": f"{len(stats)} 項（{'、'.join(list(stats)[:5])}）" if stats else "查無資料"},
+        {"item": "年度目標已設定",
+         "ok": bool(stats) and any(v["goal"] is not None for v in stats.values()),
+         "detail": "已設定" if (stats and any(v["goal"] is not None for v in stats.values()))
+                   else "尚未設定 → 目標／差額／達成率顯示「-」"},
+        {"item": "教會見證", "ok": True, "detail": f"{len(res['church_testimony'])} 場"},
+        {"item": "會費繳納", "ok": True, "detail": f"{len(res['membership_fees'])} 筆"},
+    ]
+
+    # 已設定目標的年度 → 供介面說明 Excel 報表可用範圍
+    try:
+        goal_years = grafana.available_goal_years()
+    except grafana.GrafanaError:
+        goal_years = []
+
+    return {
+        "source": "api",
+        "fiscal_year": fy,
+        "requested_fiscal_year": meta.fiscal_year,
+        "period": res["period"],
+        "team": res["team"],
+        "checks": checks,
+        "all_ok": all(c["ok"] for c in checks),
+        "warnings": res["warnings"],
+        "counts": res["counts"],
+        "ministry_stats": stats,
+        "church_testimony": res["church_testimony"],
+        "membership_fees": res["membership_fees"][:100],
+        "bible_giving": res["bible_giving"][:100],
+        "goal_years": goal_years,
+        "excel_available": fy in goal_years,
+        "dashboard_url": grafana.dashboard_url(fy),
+        "patch": {                        # 確認後才送去 /api/commit
+            "ministry_stats_api": stats,
+            "church_testimony_api": res["church_testimony"],
+            "membership_fees_api": res["membership_fees"],
+            "offerings_api": res["offerings_detail"],
+            "bible_giving_api": res["bible_giving"],
+        },
+    }
+
+
+@app.post("/api/grafana/excel")
+def api_grafana_excel(req: FetchReq):
+    """次要路徑：下載 Excel 報表（僅限已設定年度目標的年度）。"""
+    meta = _meta(req.year, req.month)
+    fy = req.fiscal_year or meta.fiscal_year
+    wd = _work_dir(req.year, req.month)
+    dest = wd / f"事工成果表_{req.year}_{req.month:02d}.xlsx"
+    try:
+        res = grafana.fetch_excel(str(dest), fy, req.team, req.allow_fallback)
+    except grafana.GrafanaError as exc:
+        raise HTTPException(502, str(exc))
+    if not res["ok"]:
+        raise HTTPException(502, res["error"])
+    return res
 
 
 # ── API：確認後寫入資料模型 ──────────────────────────────

@@ -58,6 +58,17 @@ def init_month(base_dir: str, meta: Meta, template_dir: str | None = None) -> di
         files.append({"suffix": suffix, "name": os.path.basename(dst),
                       "path": dst, "status": "copied"})
 
+    # 附件（如 -A.行事曆2026-2027北區.docx）一併帶過來
+    prev_prefix = f"月例會議程{meta.prev_roc_year}年{meta.prev_month}月"
+    for src in glob.glob(os.path.join(prev_dir, f"{prev_prefix}-A*.docx")):
+        tail = os.path.basename(src)[len(prev_prefix):]
+        dst = os.path.join(work_dir,
+                           f"月例會議程{meta.roc_year}年{meta.report_month}月{tail}")
+        if not os.path.exists(dst):
+            shutil.copy2(src, dst)
+        files.append({"suffix": tail.rstrip(".docx"), "name": os.path.basename(dst),
+                      "path": dst, "status": "copied", "extra": True})
+
     return {"ok": True, "work_dir": work_dir, "template_dir": prev_dir,
             "files": files, "missing": skipped}
 
@@ -85,17 +96,27 @@ def generate_all(work_dir: str, meta: Meta, excel_path: str | None = None,
         log = update_dates(doc, meta)
         status, notes = "ok", []
 
+        # API 資料優先於 Excel（新財年 Excel 產不出來，API 才有正確數字）
+        api_stats = (model.get("ministry_stats_api") or None)
+        api_churches = (model.get("church_testimony_api") or None)
+
         try:
             if num == 1:
                 notes += _update_agenda(doc, meta, model)
-            elif num == 2 and data:
-                notes += _update_ministry(doc, data)
+            elif num == 2:
+                if api_stats:
+                    notes += _update_ministry_from_api(doc, api_stats)
+                elif data:
+                    notes += _update_ministry(doc, data)
             elif num == 4 and data:
                 notes += _update_offerings(doc, data)
             elif num == 5:
                 notes += _update_bible_giving(doc, meta, model)
-            elif num == 9 and data:
-                notes += _update_church_testimony(doc, data)
+            elif num == 9:
+                if api_churches:
+                    notes += _update_church_testimony_api(doc, api_churches, api_stats)
+                elif data:
+                    notes += _update_church_testimony(doc, data)
         except Exception as exc:  # 不讓單一檔失敗中斷整批
             status, notes = "warn", notes + [f"更新時發生例外：{exc}"]
 
@@ -162,6 +183,51 @@ def _fmt_stat(key: str, val, unit: str) -> str:
     if isinstance(val, (int, float)):
         return f"{int(round(val)):,}{unit}"
     return f"{val}{unit}"
+
+
+def _update_ministry_from_api(doc, stats: dict) -> list[str]:
+    """-2 事工成果統計表：以 Grafana API 的 category 資料填四列。
+
+    新財年目標未設定時 goal=None，目標／差額／達成率填「-」，
+    與實際 6 月報告的呈現一致。
+    """
+    from .grafana import MINISTRY_CATEGORIES
+    table = doc.tables[0]
+    notes, filled, missing = [], 0, []
+
+    # docx 列標籤 → API 欄位名（與 Excel 版的 target/actual/… 不同）
+    api_fields = {"目標": "goal", "成果": "value", "差額": "diff", "達成率": "rate"}
+
+    for label, key in api_fields.items():
+        row = _find_row(table, label)
+        if row is None:
+            notes.append(f"找不到「{label}」列")
+            continue
+        for col, category in MINISTRY_CATEGORIES.items():
+            if col >= len(row.cells):
+                continue
+            rec = stats.get(category)
+            if rec is None:
+                if label == "成果" and category not in missing:
+                    missing.append(category)
+                set_cell_text(row.cells[col], "-")
+                continue
+            unit = "人" if category in ("增加弟兄", "增加姊妹", "弟兄會費",
+                                        "姊妹會費") else (
+                   "次" if category == "教會見證" else "")
+            set_cell_text(row.cells[col], _fmt_stat(key, rec[key], unit))
+            filled += 1
+
+    act = {c: (stats.get(c) or {}).get("value") for c in
+           ("弟兄會費", "姊妹會費", "教會聖奉", "贈送聖經")}
+    notes.append(f"四列共 {filled} 欄取自 Grafana API"
+                 f"（成果：會費 {act['弟兄會費']}/{act['姊妹會費']}、"
+                 f"教會聖奉 {act['教會聖奉']}、贈經 {act['贈送聖經']}）")
+    if missing:
+        notes.append(f"下列項目本財年查無資料，已填「-」：{'、'.join(missing)}")
+    if stats and all(v["goal"] is None for v in stats.values()):
+        notes.append("⚠️ 本財年年度目標尚未設定，目標／差額／達成率皆為「-」")
+    return notes
 
 
 def _update_ministry(doc, data: MinistryExcel) -> list[str]:
@@ -251,19 +317,53 @@ def _church_key(name: str) -> str:
     return s
 
 
+def _longest_common(a: str, b: str) -> str:
+    """最長共同子字串（用於教會名不同寫法的比對）。"""
+    if not a or not b:
+        return ""
+    best, la, lb = "", len(a), len(b)
+    prev = [0] * (lb + 1)
+    for i in range(1, la + 1):
+        cur = [0] * (lb + 1)
+        for j in range(1, lb + 1):
+            if a[i - 1] == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > len(best):
+                    best = a[i - cur[j]:i]
+        prev = cur
+    return best
+
+
+# 共同字串達此長度即視為同一間教會（如「愛加倍」）
+MIN_COMMON = 3
+
+
 def _match_church(cname: str, chs: list[dict]):
-    """先精確、再正規化包含比對。回傳 (教會資料, 比對方式) 或 (None, '')。"""
+    """精確 → 正規化包含 → 最長共同子字串。回傳 (教會資料, 比對方式)。
+
+    實際資料兩邊寫法常不同：
+      「板城靈糧堂教會」vs「板城靈糧堂」→ 包含比對
+      「樹林愛加倍教會」vs「愛加倍浸信會」→ 共同子字串「愛加倍」
+    """
     for c in chs:
         if str(c["church"]) == cname:
             return c, "exact"
+
     k = _church_key(cname)
     if len(k) < 2:
         return None, ""
+
     for c in chs:
         ck = _church_key(c["church"])
         if ck and (k == ck or k in ck or ck in k):
             return c, "fuzzy"
-    return None, ""
+
+    best, best_len = None, 0
+    for c in chs:
+        common = _longest_common(k, _church_key(c["church"]))
+        if len(common) >= MIN_COMMON and len(common) > best_len:
+            best, best_len = c, len(common)
+    return (best, "partial") if best else (None, "")
 
 
 def _update_church_testimony(doc, data: MinistryExcel) -> list[str]:
@@ -324,6 +424,68 @@ def _update_church_testimony(doc, data: MinistryExcel) -> list[str]:
     left = [c["church"] for c in chs if str(c["church"]) not in used]
     if left:
         notes.append(f"⚠️ Excel 有但表中未列 {len(left)} 間：" + "、".join(map(str, left[:8])))
+    return notes
+
+
+def _update_church_testimony_api(doc, churches: list[dict],
+                                 stats: dict | None) -> list[str]:
+    """-9 年度教會見證：以 API 資料更新，匯總列取 API 的教會見證/教會聖奉。"""
+    table = doc.tables[0]
+    used, exact, fuzzy, unmatched = set(), 0, 0, []
+
+    for row in table.rows[2:]:
+        cells = row.cells
+        if len(cells) < 12:
+            continue
+        cname = get_cell_text(cells[1])
+        if not cname or "小計" in cname or "目標" in cname:
+            continue
+        c, how = _match_church(cname, churches)
+        if not c:
+            unmatched.append(cname)
+            continue
+        if c["date"]:
+            set_cell_text(cells[5], str(c["date"]).replace("-", "/"))
+        if c["speaker"]:
+            set_cell_text(cells[9], str(c["speaker"]))
+        set_cell_text(cells[11], f"{int(c['amount']):,}" if c["amount"] else "")
+        used.add(str(c["church"]))
+        exact += how == "exact"
+        fuzzy += how in ("fuzzy", "partial")
+
+    cnt = (stats or {}).get("教會見證") or {}
+    amt = (stats or {}).get("教會聖奉") or {}
+    total = int(amt.get("value") or 0)
+    tgt_amt = amt.get("goal")
+    done = int(cnt.get("value") or len(churches))
+    tgt_cnt = cnt.get("goal")
+    rate = f"{total / tgt_amt * 100:.0f}%" if tgt_amt else "-"
+
+    summary = []
+    for row in table.rows[-4:]:
+        text = get_cell_text(row.cells[0])
+        if "小計" in text and len(row.cells) > 11:
+            set_cell_text(row.cells[11], f"{total:,}")
+            summary.append(f"小計 {total:,}")
+        elif "目標間數" in text:
+            set_cell_text(row.cells[0],
+                          f"目標間數: {tgt_cnt if tgt_cnt is not None else '-'}"
+                          f"    已達成: {done} 間")
+            summary.append(f"間數 {done}/{tgt_cnt if tgt_cnt is not None else '-'}")
+        elif "目標金額" in text:
+            set_cell_text(row.cells[0],
+                          f"目標金額: {f'{int(tgt_amt):,}' if tgt_amt else '-'}"
+                          f"    已達成: {total:,} 元    達成率: {rate}")
+            summary.append(f"金額 {total:,}（{rate}）")
+
+    notes = [f"教會見證取自 API，已更新 {exact + fuzzy} 間（精確 {exact}、模糊 {fuzzy}）",
+             "匯總列：" + ("、".join(summary) if summary else "未找到，請人工檢查")]
+    if unmatched:
+        notes.append(f"⚠️ 表中有但 API 無資料的教會 {len(unmatched)} 間："
+                     + "、".join(unmatched[:8]))
+    left = [c["church"] for c in churches if str(c["church"]) not in used]
+    if left:
+        notes.append(f"⚠️ API 有但表中未列 {len(left)} 間：" + "、".join(map(str, left[:8])))
     return notes
 
 
