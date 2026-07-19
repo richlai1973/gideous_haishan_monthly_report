@@ -110,8 +110,13 @@
       <p class="hint">以上月 10 份 docx 為範本複製並重新命名，日期依「先具體後通用」順序替換。
         範本月份、財年皆自動推導。</p>
       <div class="bar">
-        <a id="dash-link" href="#" target="_blank"><button class="ghost">開啟最新年度 Grafana Dashboard</button></a>
-        <span class="hint">登入後匯出 Excel，再到「② 行政財務」上傳</span>
+        <a href="https://gideons.tw/member" target="_blank"><button>開啟基甸會會員入口</button></a>
+        <span class="hint">登入 → 「{支會}成果表」→ 選
+          <b><span id="tw-fy2">—</span> 年度</b> → 右上「匯出」→ 到「② 行政財務」上傳</span>
+      </div>
+      <div class="bar" style="margin-top:8px">
+        <a id="dash-link" href="#" target="_blank"><button class="ghost">Grafana Dashboard（次要）</button></a>
+        <span class="hint">免登入，但新財年拿不到年度目標</span>
       </div>
       <div id="p1-out"></div>
     </div>
@@ -389,7 +394,7 @@ $('#btn-fetch').onclick = async (e) => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ year: Y(), month: M(),
                              fiscal_year: +$('#fy').value || null,
-                             allow_fallback: $('#fallback').checked })
+                             allow_fallback: false })
     });
     FETCHED = r;
     const s = r.ministry_stats;
@@ -545,6 +550,7 @@ $('#btn-drive').onclick = async (e) => {
   await refresh();
   $('#fy').value = STATE.meta.fiscal_year;
   $('#tw-fy').textContent = STATE.meta.fiscal_year;
+  $('#tw-fy2').textContent = STATE.meta.fiscal_year;
 })();
 </script>
 </body>
