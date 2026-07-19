@@ -211,18 +211,34 @@ def api_grafana_fetch(req: FetchReq):
 
 @app.post("/api/grafana/excel")
 def api_grafana_excel(req: FetchReq):
-    """次要路徑：下載 Excel 報表（僅限已設定年度目標的年度）。"""
+    """產出事工成果表 Excel。
+
+    先試官方報表端點；該年度目標未建檔而回 500 時，
+    改由 API 資料**重建**同版面的 Excel，兩者都存成同一個檔名。
+    """
     meta = _meta(req.year, req.month)
     fy = req.fiscal_year or meta.fiscal_year
     wd = _work_dir(req.year, req.month)
+    wd.mkdir(parents=True, exist_ok=True)
     dest = wd / f"事工成果表_{req.year}_{req.month:02d}.xlsx"
+
     try:
         res = grafana.fetch_excel(str(dest), fy, req.team, req.allow_fallback)
+        if res["ok"]:
+            return {**res, "rebuilt": False}
+        official_error = res["error"]
+
+        # 官方報表產不出來 → 用 API 重建
+        from engine import build_excel
+        data = grafana.fetch_all(fy, req.team)
+        built = build_excel.build(data, str(dest), req.team)
+        return {"ok": True, "source": "rebuilt", "rebuilt": True,
+                "official_error": official_error, "fiscal_year": fy,
+                "file": dest.name, "path": str(dest),
+                "size": dest.stat().st_size, **built,
+                "warnings": data["warnings"]}
     except grafana.GrafanaError as exc:
         raise HTTPException(502, str(exc))
-    if not res["ok"]:
-        raise HTTPException(502, res["error"])
-    return res
 
 
 # ── API：確認後寫入資料模型 ──────────────────────────────

@@ -125,21 +125,95 @@ def ministry_stats(fiscal_year: int, team: str = DEFAULT_TEAM) -> dict:
 
 
 def church_testimony(fiscal_year: int, team: str = DEFAULT_TEAM) -> list[dict]:
-    """-9 年度教會見證：已完成的見證場次與奉獻金額。"""
+    """-9 年度教會見證：見證場次 **與** 教會奉獻的聯集。
+
+    ⚠️ 兩者不一定同時存在，必須 FULL OUTER JOIN：
+      - 有場次無奉獻：愛加倍浸信會（2026/07/05 黃哲斌）
+      - 有奉獻無場次：基督國度溪水旁教會 5,900、樹林長老教會（北中）500
+    只查場次會漏掉全部實際奉獻金額（實測 FY2027 即是如此）。
+    """
     start, end = fiscal_range(fiscal_year)
+    t = _sqlstr(team)
     rows = query(
-        "WITH e AS (SELECT TO_CHAR(datetime,'YYYY/MM/DD') AS date, * "
-        "  FROM gideons_witness_event_data "
-        f" WHERE team = '{_sqlstr(team)}' "
-        f"   AND datetime BETWEEN '{start}' AND '{end}' AND datetime < CURRENT_DATE), "
-        "td AS (SELECT track_id, amount FROM v_event_donation_amount "
-        "       WHERE track_id IN (SELECT track_id FROM e)) "
-        "SELECT e.date, e.partner, e.provider, td.amount "
-        "FROM e LEFT JOIN td ON e.track_id = td.track_id ORDER BY e.datetime",
-        fiscal_year)
-    return [{"date": r.get("date"), "speaker": r.get("partner"),
-             "church": r.get("provider"), "amount": r.get("amount") or 0}
+        "WITH ev AS (SELECT track_id, TO_CHAR(datetime,'YYYY/MM/DD') AS d, "
+        "              partner, provider, datetime "
+        f"           FROM gideons_witness_event_data WHERE team = '{t}' "
+        f"             AND datetime BETWEEN '{start}' AND '{end}'), "
+        "don AS (SELECT partner AS church, SUM(amount) AS amt "
+        f"        FROM gideons_witness_donation WHERE team = '{t}' "
+        f"          AND date BETWEEN '{start}' AND '{end}' GROUP BY partner) "
+        "SELECT COALESCE(ev.provider, don.church) AS church, "
+        "       ev.d AS date, ev.partner AS speaker, don.amt AS amount, "
+        "       ev.datetime AS dt "
+        "FROM ev FULL OUTER JOIN don ON ev.provider = don.church "
+        "ORDER BY ev.datetime NULLS LAST, church", fiscal_year)
+    return [{"date": r.get("date"), "speaker": r.get("speaker"),
+             "church": r.get("church"), "amount": r.get("amount") or 0,
+             "has_event": bool(r.get("date")),
+             "donation_only": not r.get("date") and bool(r.get("amount"))}
             for r in rows]
+
+
+def member_roster(fiscal_year: int, team: str = DEFAULT_TEAM) -> list[dict]:
+    """會員名冊與會費狀態（Excel D–G 欄）。
+
+    「弟兄會費／姊妹會費」欄位語意同 dashboard：一般會員顯示最近繳費日期，
+    終身／資深顯示類別，安息／退會顯示 None。
+    """
+    start, end = fiscal_range(fiscal_year)
+    t = _sqlstr(team)
+    fee = ("(SELECT to_char(date,'MM/DD') FROM v_membership_record "
+           "  WHERE ref IN ({ref}) AND date BETWEEN '{s}' AND '{e}' "
+           "  ORDER BY date DESC LIMIT 1)")
+    b_fee = fee.format(ref='"會員編號", TRIM(LEADING \'0\' FROM "會員編號")',
+                       s=start, e=end)
+    s_fee = fee.format(ref='"會員編號" || \'A\', '
+                           'TRIM(LEADING \'0\' FROM "會員編號") || \'A\'',
+                       s=start, e=end)
+    rows = query(
+        "WITH LIST AS (SELECT \"會員編號\", "
+        f" (CASE WHEN \"弟兄安息\" < '{start}' OR \"弟兄類別\"='退會' "
+        "        THEN NULL ELSE \"弟兄\" END) AS b, "
+        f" (CASE WHEN \"姊妹安息\" < '{start}' OR \"姊妹類別\"='退會' "
+        "        THEN NULL ELSE \"姊妹\" END) AS s, "
+        " \"弟兄類別\" AS bt, \"姊妹類別\" AS st, "
+        " \"弟兄退會\" AS bq, \"姊妹退會\" AS sq, "
+        " \"弟兄支會\" AS bteam, \"姊妹支會\" AS steam, "
+        " (CASE WHEN (\"弟兄類別\" NOT IN ('終身','資深') AND \"弟兄安息\" IS NULL "
+        f"             AND \"弟兄退會\" IS NULL) THEN {b_fee} "
+        "        WHEN \"弟兄類別\" LIKE '%安息%' OR \"弟兄類別\"='退會' THEN NULL "
+        "        ELSE \"弟兄類別\" END) AS bfee, "
+        " (CASE WHEN (\"姊妹類別\" NOT IN ('終身','資深') AND \"姊妹安息\" IS NULL "
+        f"             AND \"姊妹退會\" IS NULL) THEN {s_fee} "
+        "        WHEN \"姊妹類別\" LIKE '%安息%' OR \"姊妹類別\"='退會' THEN NULL "
+        "        ELSE \"姊妹類別\" END) AS sfee "
+        f" FROM v_membership_gender_joined WHERE '{t}' IN (\"弟兄支會\",\"姊妹支會\") "
+        f"   AND ((\"弟兄入會\"::date <= '{end}' AND (\"弟兄退會\" IS NULL "
+        f"         OR \"弟兄退會\"::date >= '{start}')) "
+        f"     OR (\"姊妹入會\"::date <= '{end}' AND (\"姊妹退會\" IS NULL "
+        f"         OR \"姊妹退會\"::date >= '{start}')))) "
+        "SELECT DISTINCT \"會員編號\" AS id, b, s, bfee, sfee, bt, st FROM LIST "
+        f"WHERE ((b IS NOT NULL AND bt <> '退會' AND bteam = '{t}') "
+        f"    OR (s IS NOT NULL AND st <> '退會' AND steam = '{t}')) "
+        "ORDER BY id", fiscal_year)
+    return [{"id": r.get("id"), "brother": r.get("b"), "sister": r.get("s"),
+             "fee_brother": r.get("bfee"), "fee_sister": r.get("sfee"),
+             "type_brother": r.get("bt"), "type_sister": r.get("st")}
+            for r in rows]
+
+
+def offerings_by_member(fiscal_year: int, team: str = DEFAULT_TEAM) -> dict:
+    """依 category 分組的奉獻明細（Excel H–K 欄：聖經奉獻、巴拿巴）。"""
+    detail = offerings_detail(fiscal_year, team)
+    out: dict[str, dict[str, float]] = {}
+    for d in detail:
+        cat = d["category"]
+        if cat not in ("弟兄聖奉", "姊妹聖奉", "巴拿巴"):
+            continue
+        out.setdefault(cat, {})
+        key = str(d["id"] or d["name"])
+        out[cat][key] = out[cat].get(key, 0) + (d["amount"] or 0)
+    return out
 
 
 def membership_fees(fiscal_year: int, team: str = DEFAULT_TEAM) -> list[dict]:
@@ -194,9 +268,18 @@ def fetch_all(fiscal_year: int, team: str = DEFAULT_TEAM) -> dict:
     fees = membership_fees(fiscal_year, team)
     offerings = offerings_detail(fiscal_year, team)
     bibles = bible_giving(fiscal_year, team)
+    roster = member_roster(fiscal_year, team)
+    by_member = offerings_by_member(fiscal_year, team)
 
     start, end = fiscal_range(fiscal_year)
     warnings = []
+    donation_only = [c["church"] for c in churches if c["donation_only"]]
+    if donation_only:
+        warnings.append(
+            f"有奉獻但尚無見證場次的教會 {len(donation_only)} 間："
+            + "、".join(map(str, donation_only)) + "。金額已計入教會聖奉合計。")
+    if not bibles:
+        warnings.append("本財年尚無贈經紀錄，贈經相關欄位會是 0／空白。")
     if not stats:
         warnings.append(f"{fiscal_year} 財年查無任何成果資料，請確認年度是否正確。")
     elif all(v["goal"] is None for v in stats.values()):
@@ -211,9 +294,12 @@ def fetch_all(fiscal_year: int, team: str = DEFAULT_TEAM) -> dict:
         "church_testimony": churches,
         "membership_fees": fees,
         "offerings_detail": offerings,
+        "offerings_by_member": by_member,
         "bible_giving": bibles,
-        "counts": {"教會見證": len(churches), "會費筆數": len(fees),
-                   "奉獻筆數": len(offerings), "贈經筆數": len(bibles)},
+        "member_roster": roster,
+        "counts": {"會員": len(roster), "教會見證": len(churches),
+                   "會費筆數": len(fees), "奉獻筆數": len(offerings),
+                   "贈經筆數": len(bibles)},
         "warnings": warnings,
     }
 

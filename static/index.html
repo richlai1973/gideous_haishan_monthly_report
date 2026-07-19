@@ -125,6 +125,7 @@
           擷取後列出檢核與關鍵數字，<b>確認無誤再套用</b>。</p>
         <div class="bar">
           <button id="btn-fetch">擷取本財年資料</button>
+          <button id="btn-xlsx" class="ghost">產生成果表 Excel</button>
           <span class="hint">財年：</span>
           <input id="fy" type="number" style="width:90px">
         </div>
@@ -401,6 +402,27 @@ $('#btn-fetch').onclick = async (e) => {
       <p class="hint">若持續失敗，可改用手動匯出後從下方上傳。</p>`;
   }
   e.target.disabled = false; e.target.textContent = '從 Dashboard 下載成果表';
+};
+
+$('#btn-xlsx').onclick = async (e) => {
+  e.target.disabled = true; e.target.textContent = '產生中…';
+  try {
+    const r = await api('/api/grafana/excel', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ year: Y(), month: M(),
+                             fiscal_year: +$('#fy').value || null })
+    });
+    $('#out-fetch').insertAdjacentHTML('beforeend', `
+      <p class="badge ${r.rebuilt ? 'warn' : 'ok'}">
+        ${r.rebuilt ? '官方報表無法產生，已由 API 重建' : '已下載官方報表'}
+        — ${esc(r.file)}（${(r.size / 1024).toFixed(1)} KB）</p>
+      ${r.rebuilt ? `<p class="hint">原因：${esc(r.official_error)}<br>
+        內容：會員 ${r.members} 位、教會見證 ${r.churches} 間、贈經類型 ${r.bible_kinds} 種</p>` : ''}
+      <p><a href="/api/download?year=${Y()}&month=${M()}&name=${encodeURIComponent(r.file)}">下載這份 Excel</a></p>`);
+  } catch (err) {
+    $('#out-fetch').insertAdjacentHTML('beforeend', `<p class="badge err">${esc(err.message)}</p>`);
+  }
+  e.target.disabled = false; e.target.textContent = '產生成果表 Excel';
 };
 
 async function applyFetched() {

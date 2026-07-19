@@ -100,6 +100,46 @@ def test_excel_fallback_off_by_default():
     assert sig.parameters["allow_fallback"].default is False
 
 
+def test_church_testimony_includes_donation_only():
+    """有奉獻但無見證場次的教會不可漏（FY2027 實際情況）。"""
+    grafana.query = lambda sql, fy: [
+        {"church": "基督國度溪水旁教會", "date": None, "speaker": None, "amount": 5900},
+        {"church": "愛加倍浸信會", "date": "2026/07/05", "speaker": "黃哲斌", "amount": None},
+    ]
+    chs = grafana.church_testimony(2027)
+    assert sum(c["amount"] for c in chs) == 5900
+    only = [c for c in chs if c["donation_only"]]
+    assert len(only) == 1 and only[0]["church"] == "基督國度溪水旁教會"
+    assert [c for c in chs if c["has_event"]][0]["church"] == "愛加倍浸信會"
+
+
+def test_build_excel_roundtrip(tmp_path):
+    """重建的 Excel 必須能被既有解析器讀回。"""
+    from engine.build_excel import build
+    from engine.parse_excel import MinistryExcel
+    data = {
+        "fiscal_year": 2027,
+        "ministry_stats": {"弟兄會費": {"goal": None, "value": 3, "diff": None, "rate": None},
+                           "教會聖奉": {"goal": None, "value": 6400, "diff": None, "rate": None}},
+        "member_roster": [{"id": "4412", "brother": "黃哲斌", "sister": "牛啟慧",
+                           "fee_brother": "06/03", "fee_sister": "06/03",
+                           "type_brother": "一般", "type_sister": "一般"}],
+        "offerings_by_member": {"弟兄聖奉": {"4412": 2000}, "姊妹聖奉": {"4412A": 1000}},
+        "church_testimony": [{"church": "基督國度溪水旁教會", "date": None,
+                              "speaker": None, "amount": 5900}],
+        "bible_giving": [],
+    }
+    dest = tmp_path / "out.xlsx"
+    info = build(data, str(dest))
+    assert info["members"] == 1 and dest.exists()
+
+    mx = MinistryExcel(str(dest))
+    assert mx.sheet_name == "支會各項事工成果表"
+    assert mx.summary["actual"]["fee_brother"] == 3
+    assert mx.summary["actual"]["church_offering"] == 6400
+    assert mx.churches()[0]["amount"] == 5900
+
+
 def test_api_stats_shape():
     """ministry_stats 需算出 diff/rate；目標未設定時為 None。"""
     grafana.query = lambda sql, fy: [
