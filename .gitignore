@@ -3,10 +3,11 @@
 .env.*
 !.env.example
 credentials/
-*.json
-!package.json
 token.json
 client_secret*.json
+*credentials*.json
+# 註：不要用 *.json 一網打盡——那會連 vercel.json 這類設定檔一起擋掉，
+#     曾因此讓部署缺少設定而整站 404。要擋就指名擋。
 
 # 產出與輸入資料（含個資、奉獻金額）
 _inputs/
