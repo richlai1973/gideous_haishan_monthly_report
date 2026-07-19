@@ -39,6 +39,14 @@ if _env_file.exists():
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
+from engine import auth as _auth_probe  # noqa: E402  （需在設定路徑前判斷環境）
+
+# 雲端沒有持久磁碟，一律改用 /tmp；本機維持原本的資料夾
+if _auth_probe.is_cloud():
+    os.environ.setdefault("STORAGE", "drive")
+    os.environ.setdefault("GIDEONS_BASE_DIR", "/tmp/gideons")
+    os.environ.setdefault("GIDEONS_CRED_DIR", "/tmp/gideons-cred")
+
 BASE_DIR = Path(os.environ.get("GIDEONS_BASE_DIR",
                                Path.home() / "Documents" / "海山支會"))
 CRED_DIR = Path(os.environ.get("GIDEONS_CRED_DIR", APP_DIR / "credentials"))

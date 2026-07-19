@@ -1,13 +1,22 @@
 # Vercel 部署步驟
 
-兩個版本共用同一份程式碼，差別只在儲存層與授權方式：
+兩個版本共用同一份 `app.py`，靠環境變數自動切換：
 
-| | 本機 `run.py` | Vercel `api/index.py` |
+| | 本機 `python3 run.py` | Vercel |
 |---|---|---|
+| 進入點 | `run.py` → `app.py` | `app.py`（Vercel 自動偵測） |
 | 儲存 | `~/Documents/海山支會` | Google Drive（`/tmp` 只在單次請求內用） |
 | 授權 | `credentials/token.json` | 環境變數 refresh token |
 | 密碼 | 可不設 | **必填**，未設會回 503 |
 | 範本 | 上月本機資料夾 | Drive 的「{年}年{MM}月」資料夾 |
+
+App 偵測到 `VERCEL` 環境變數就自動切成 Drive 儲存層並改用 `/tmp`，
+不需要額外的進入點檔案。
+
+> **不要另外建 `api/index.py`。** Vercel 會在
+> `app.py`／`index.py`／`server.py`／`main.py`／`wsgi.py`／`asgi.py`
+> （根目錄或 `src/`、`app/`、`api/` 內）尋找名為 `app` 的 FastAPI 實例。
+> 同時存在兩個進入點會造成路由解析錯誤，出現 `404: NOT_FOUND`。
 
 ---
 
@@ -55,9 +64,39 @@ Project → Settings → Environment Variables，全部套用到 Production：
 | `GOOGLE_CLIENT_SECRET` | 步驟 1 取得 | |
 | `GOOGLE_REFRESH_TOKEN` | 步驟 1 取得 | |
 | `GIDEONS_DRIVE_PARENT` | `15HBrIm4TOJrIMHo6ydHR2bWHN0ZTrWJ5` | Drive「月例會」資料夾 |
-| `STORAGE` | `drive` | `api/index.py` 已預設，可省略 |
+| `STORAGE` | `drive` | 偵測到 Vercel 會自動設定，可省略 |
 
 設完按 **Deploy**。
+
+---
+
+## 疑難排解
+
+### `404: NOT_FOUND`
+
+依序檢查：
+
+1. **有沒有多個進入點**：根目錄 `app.py` 之外若還有 `api/index.py`，
+   Vercel 會解析錯誤。只留一個。
+2. **`vercel.json` 不要寫 `rewrites`**：整個 FastAPI 會被打包成**單一
+   function**，所有路由由 FastAPI 自己處理，不需要也不應該再加 rewrite。
+   多加了反而會把請求導到不存在的路徑。
+3. **`functions` 不要指定 `runtime`**：只需要 `maxDuration` 之類的設定，
+   鍵名要對應實際的進入點檔案（本專案是 `app.py`）。
+
+正確的 `vercel.json` 就是這樣，沒有其他東西：
+
+```json
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": { "app.py": { "maxDuration": 60 } }
+}
+```
+
+### 部署成功但頁面空白／500
+
+到 Vercel 的 **Logs** 分頁看 function 的錯誤訊息。最常見是環境變數漏設，
+此時狀態列的「Drive」會顯示未授權。
 
 ---
 
