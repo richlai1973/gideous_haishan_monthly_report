@@ -135,9 +135,26 @@
         <div id="out-fetch"></div>
       </div>
 
+      <div class="card" style="background:#fbfcfd">
+        <b>官方成果表 — 自行匯出後上傳（建議）</b>
+        <p class="hint">總會會員入口的匯出檔<b>含年度目標</b>，是 Grafana 拿不到的。
+          上傳這份就能把目標／差額／達成率一次補齊。</p>
+        <ol class="hint" style="margin:8px 0 10px 18px">
+          <li><a id="tw-link" href="https://gideons.tw/member" target="_blank">開啟基甸會會員入口</a>
+              → 登入</li>
+          <li>點 <b>「{支會}成果表」</b> → 選 <b><span id="tw-fy">2027</span> 年度</b></li>
+          <li>右上角 <b>匯出</b> → 得到
+              <code>{年度}年度{支會}事工成果表_MMDD.xlsx</code></li>
+          <li>把檔案拖到下方上傳區</li>
+        </ol>
+        <div class="drop" data-mod="finance">拖曳或點擊上傳成果表 Excel</div>
+        <p class="hint" style="margin-top:6px">
+          兩種版面都支援：總會匯出（15 欄）與 Grafana 匯出（17 欄），系統自動辨識。</p>
+        <div id="out-finance"></div>
+      </div>
+
       <p class="hint">其他財務檔案（現金帳、收支表）請上傳：xlsx / csv / pdf / txt。</p>
-      <div class="drop" data-mod="finance">拖曳或點擊上傳檔案</div>
-      <div id="out-finance"></div>
+      <div class="drop" data-mod="finance">拖曳或點擊上傳其他財務檔案</div>
     </div>
 
     <div class="pane" id="p3">
@@ -285,7 +302,7 @@ document.querySelectorAll('.drop').forEach(d => {
 $('#picker').onchange = e => { upload(pendingModule, e.target.files); e.target.value = ''; };
 
 async function upload(mod, files) {
-  const out = $('#out-' + mod);
+  const out = $('#out-' + mod) || $('#out-other');
   for (const f of files) {
     out.insertAdjacentHTML('beforeend', `<p class="hint">上傳 ${f.name}…</p>`);
     const fd = new FormData();
@@ -321,9 +338,25 @@ function renderParse(mod, r) {
       `</table></details>`;
   }
 
+  // 官方成果表：直接列出目標／成果對照，並標示辨識到的版面
+  let stats = '';
+  const ms = r.data?.ministry_stats_api;
+  if (ms && Object.keys(ms).length) {
+    const c = (rec, k) => rec[k] === null || rec[k] === undefined ? '-'
+      : (k === 'rate' ? (rec[k] * 100).toFixed(0) + '%' : fmt(rec[k]));
+    const layout = r.data?.analysis?.layout;
+    stats = `<p class="hint">版面：${layout === 'gideons' ? '總會匯出（含年度目標）'
+                                : 'Grafana 匯出'}　區間：${esc(r.data?.analysis?.date_range || '—')}</p>
+      <table><tr><th>項目</th><th>目標</th><th>成果</th><th>差額</th><th>達成率</th></tr>
+      ${Object.keys(ms).map(k => `<tr><td>${esc(k)}</td><td>${c(ms[k],'goal')}</td>
+        <td><b>${c(ms[k],'value')}</b></td><td>${c(ms[k],'diff')}</td>
+        <td>${c(ms[k],'rate')}</td></tr>`).join('')}</table>`;
+  }
+
   return `<div class="card" style="margin-top:12px">
     <b>${esc(r.file)}</b> <span class="badge ${r.needs_review ? 'warn' : 'ok'}">${r.kind}</span>
     <p>${esc(r.summary)}</p>
+    ${stats}
     ${r.affected_docs?.length ? `<p class="hint">影響文件：${r.affected_docs.map(n => '-' + n).join(' ')}</p>` : ''}
     ${digest}
     ${patch ? `<pre>${esc(JSON.stringify(patch.analysis || patch, null, 2).slice(0, 2500))}</pre>
@@ -511,6 +544,7 @@ $('#btn-drive').onclick = async (e) => {
   $('#year').onchange = $('#month').onchange = () => { $('#meeting').value = ''; refresh(); };
   await refresh();
   $('#fy').value = STATE.meta.fiscal_year;
+  $('#tw-fy').textContent = STATE.meta.fiscal_year;
 })();
 </script>
 </body>

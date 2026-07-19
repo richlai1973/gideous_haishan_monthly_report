@@ -140,6 +140,86 @@ def test_build_excel_roundtrip(tmp_path):
     assert mx.churches()[0]["amount"] == 5900
 
 
+def _make_gideons_xlsx(path):
+    """依實際觀察到的 gideons.tw 匯出版面（15 欄、整體左移兩欄）建檔。"""
+    from openpyxl import Workbook
+    wb = Workbook(); ws = wb.active; ws.title = "事工成果表"
+    ws["E1"] = "海山支會各項事工成果表"
+    ws["J1"] = " (2026/06/01-2027/05/31)"
+    for col, v in zip("BCDFHJN", ["弟兄", "姊妹", "會員會費", "聖經奉獻",
+                                  "巴拿巴奉獻", "教會見證奉獻", "贈經"]):
+        ws[f"{col}3"] = v
+    for col, v in {"A": "現有", "B": 24, "C": 16, "D": "弟兄", "E": "姊妹",
+                   "F": "弟兄", "G": "姊妹", "H": "弟兄", "I": "姊妹",
+                   "J": "日期", "K": "講員", "L": "名稱", "M": "奉獻",
+                   "N": "贈經總數", "O": "姊妹贈經"}.items():
+        ws[f"{col}4"] = v
+    for r, vals in {
+        5: ("目標", 3, 2, 25, 17, 55000, 15000, None, None, 10, None, None, 100000, 4000, 600),
+        6: ("成果", 0, 0, 3, 2, 3000, 1000, None, None, 2, None, None, 6400, 0, None),
+        7: ("差額", -3, -2, -22, -15, -52000, -14000, None, None, -8, None, None, -93600, -4000, -600),
+        8: ("達成率", 0, 0, .12, .12, .05, .07, None, None, .2, None, None, .06, 0, 0),
+    }.items():
+        for i, v in enumerate(vals):
+            ws.cell(r, i + 1, v)
+    for i, m in enumerate([
+        ("1192", "陳文隆", "陳雪純", "未繳", "未繳", None, None, None, None,
+         "07/05", "黃哲斌", "愛加倍浸信會", None),
+        ("4412", "黃哲斌", "牛啟慧", "06/03", "06/03", 2000, 1000, None, None,
+         None, None, "基督國度溪水旁教會", 5900)]):
+        for j, v in enumerate(m):
+            ws.cell(9 + i, j + 1, v)
+    wb.save(path)
+
+
+def test_detect_gideons_layout(tmp_path):
+    """總會匯出版面欄位左移兩欄，誤判會讀成完全錯誤的欄位。"""
+    from engine.parse_excel import MinistryExcel
+    p = tmp_path / "官方.xlsx"
+    _make_gideons_xlsx(str(p))
+    mx = MinistryExcel(str(p))
+    assert mx.layout == "gideons"
+    assert [m["brother"] for m in mx.members] == ["陳文隆", "黃哲斌"]
+    assert mx.summary["actual"]["fee_brother"] == 3
+    assert mx.summary["target"]["church_offering"] == 100000
+    assert mx.churches()[1]["amount"] == 5900
+
+
+def test_gideons_export_supplies_goals(tmp_path):
+    """官方匯出檔的 Row 5 含年度目標——這是 Grafana 拿不到的。"""
+    from engine.parse_excel import MinistryExcel
+    p = tmp_path / "官方.xlsx"
+    _make_gideons_xlsx(str(p))
+    stats = MinistryExcel(str(p)).to_ministry_stats()
+    assert stats["弟兄會費"]["goal"] == 25
+    assert stats["教會聖奉"] == {"goal": 100000, "value": 6400,
+                                 "diff": -93600, "rate": 0.064}
+
+
+def test_grafana_layout_still_detected(tmp_path):
+    """加入新版面後，原本的 17 欄版仍要正確辨識。"""
+    from openpyxl import Workbook
+    from engine.parse_excel import MinistryExcel
+    wb = Workbook(); ws = wb.active; ws.title = "支會各項事工成果表"
+    ws.cell(1, 7, "海山支會各項事工成果表")
+    ws.cell(1, 12, " (2025/06/01-2026/05/31 )")
+    ws.cell(3, 6, "會員會費"); ws.cell(3, 8, "聖經奉獻")
+    ws.cell(3, 10, "巴拿巴奉獻"); ws.cell(3, 12, "教會見證奉獻")
+    for col, v in {1: "現有", 4: 24, 5: 16, 6: "弟兄", 7: "姊妹",
+                   12: "日期", 13: "講員", 14: "名稱", 15: "奉獻",
+                   16: "贈經總數", 17: "姊妹贈經"}.items():
+        ws.cell(4, col, v)
+    for r, label in ((5, "目標"), (6, "成果"), (7, "差額"), (8, "達成率")):
+        ws.cell(r, 1, label)
+    ws.cell(6, 6, 24)
+    ws.cell(9, 1, "1192"); ws.cell(9, 4, "陳文隆"); ws.cell(9, 5, "陳雪純")
+    p = tmp_path / "grafana.xlsx"; wb.save(str(p))
+    mx = MinistryExcel(str(p))
+    assert mx.layout == "grafana"
+    assert mx.members[0]["brother"] == "陳文隆"
+    assert mx.summary["actual"]["fee_brother"] == 24
+
+
 def test_api_stats_shape():
     """ministry_stats 需算出 diff/rate；目標未設定時為 None。"""
     grafana.query = lambda sql, fy: [

@@ -13,29 +13,64 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import re
 
 import openpyxl
 
-# 會員列欄位
-COLS = {
-    "id": 1, "brother": 4, "sister": 5,
-    "fee_brother": 6, "fee_sister": 7,
-    "bible_brother": 8, "bible_sister": 9,
-    "barnabas_brother": 10, "barnabas_sister": 11,
-    "church_date": 12, "church_speaker": 13,
-    "church_name": 14, "church_offering": 15,
-    "scripture_kind": 16, "scripture_count": 17,
+# ── 兩種版面 ────────────────────────────────────────────
+# 事工成果表有兩個來源，欄位位置不同（皆已用實際檔案驗證）：
+#
+#   grafana  — Grafana /report/campstat 匯出，17 欄，B/C 空白
+#   gideons  — gideons.tw 會員入口「匯出」鈕產生，15 欄，整體左移兩欄
+#
+# 版面判斷靠 Row 4 標頭文字，不硬編欄號（見 _detect_layout）。
+
+LAYOUTS = {
+    "grafana": {
+        "cols": {
+            "id": 1, "brother": 4, "sister": 5,
+            "fee_brother": 6, "fee_sister": 7,
+            "bible_brother": 8, "bible_sister": 9,
+            "barnabas_brother": 10, "barnabas_sister": 11,
+            "church_date": 12, "church_speaker": 13,
+            "church_name": 14, "church_offering": 15,
+            "scripture_kind": 16, "scripture_count": 17,
+        },
+        "summary": {
+            "members_brother": 4, "members_sister": 5,
+            "fee_brother": 6, "fee_sister": 7,
+            "bible_brother": 8, "bible_sister": 9,
+            "barnabas_brother": 10, "barnabas_sister": 11,
+            "church_count": 12, "church_offering": 15,
+            "scripture_total": 16, "scripture_sister": 17,
+        },
+        "current_members": {"brother": (4, 4), "sister": (4, 5)},
+    },
+    "gideons": {
+        "cols": {
+            "id": 1, "brother": 2, "sister": 3,
+            "fee_brother": 4, "fee_sister": 5,
+            "bible_brother": 6, "bible_sister": 7,
+            "barnabas_brother": 8, "barnabas_sister": 9,
+            "church_date": 10, "church_speaker": 11,
+            "church_name": 12, "church_offering": 13,
+            "scripture_kind": 14, "scripture_count": 15,
+        },
+        "summary": {
+            "members_brother": 2, "members_sister": 3,
+            "fee_brother": 4, "fee_sister": 5,
+            "bible_brother": 6, "bible_sister": 7,
+            "barnabas_brother": 8, "barnabas_sister": 9,
+            "church_count": 10, "church_offering": 13,
+            "scripture_total": 14, "scripture_sister": 15,
+        },
+        "current_members": {"brother": (4, 2), "sister": (4, 3)},
+    },
 }
 
-# 匯總列（Row 5-8）欄位 → 語意名稱
-SUMMARY_COLS = {
-    "members_brother": 4, "members_sister": 5,
-    "fee_brother": 6, "fee_sister": 7,
-    "bible_brother": 8, "bible_sister": 9,
-    "barnabas_brother": 10, "barnabas_sister": 11,
-    "church_count": 12, "church_offering": 15,
-    "scripture_total": 16, "scripture_sister": 17,
-}
+# 向後相容：預設仍為 grafana 版
+COLS = LAYOUTS["grafana"]["cols"]
+SUMMARY_COLS = LAYOUTS["grafana"]["summary"]
 
 SUMMARY_ROWS = {"target": 5, "actual": 6, "diff": 7, "rate": 8}
 
@@ -88,29 +123,61 @@ class MinistryExcel:
         has_labels = ["目標", "成果", "差額", "達成率"] == labels
         return has_head and has_labels
 
+    def _detect_layout(self) -> str:
+        """靠 Row 4 標頭定位「日期／講員／名稱」三連欄判斷版面。
+
+        grafana 版在 L-N（12-14），gideons.tw 版在 J-L（10-12）。
+        找不到就退回檢查「弟兄」在 Row 4 的位置。
+        """
+        ws = self.ws
+        row4 = {c: str(ws.cell(4, c).value or "").strip() for c in range(1, 20)}
+
+        for name, spec in LAYOUTS.items():
+            c = spec["cols"]
+            if (row4.get(c["church_date"]) == "日期"
+                    and row4.get(c["church_speaker"]) == "講員"
+                    and row4.get(c["church_name"]) == "名稱"):
+                return name
+
+        # 後備：Row 4 第一個「弟兄」的位置
+        for c in range(1, 20):
+            if row4.get(c) == "弟兄":
+                return "gideons" if c <= 3 else "grafana"
+        return "grafana"
+
     # ── 解析 ────────────────────────────────────────────
     def _parse(self):
         ws = self.ws
-        self.title = _norm(ws.cell(1, 7).value)
-        self.date_range = _norm(ws.cell(1, 12).value)
+        self.layout = self._detect_layout()
+        spec = LAYOUTS[self.layout]
+        self.cols = spec["cols"]
+        self.summary_cols = spec["summary"]
+
+        # 標題與區間位置兩版不同，直接掃第 1、2 列找
+        row1 = [_norm(ws.cell(1, c).value) for c in range(1, 20)]
+        self.title = next((v for v in row1 if v and "成果表" in str(v)), None)
+        self.date_range = next(
+            (v for v in row1 if v and re.search(r"\d{4}/\d{2}/\d{2}", str(v))), None)
+
+        cm = spec["current_members"]
         self.current_members = {
-            "brother": _num(ws.cell(4, 4).value),
-            "sister": _num(ws.cell(4, 5).value),
+            "brother": _num(ws.cell(*cm["brother"]).value),
+            "sister": _num(ws.cell(*cm["sister"]).value),
         }
 
         # 匯總（目標/成果/差額/達成率）
         self.summary = {
             key: {name: _norm(ws.cell(row, col).value)
-                  for name, col in SUMMARY_COLS.items()}
+                  for name, col in self.summary_cols.items()}
             for key, row in SUMMARY_ROWS.items()
         }
 
         # 會員列
         self.members = []
         for row in range(9, ws.max_row + 1):
-            if not ws.cell(row, COLS["id"]).value:
+            if not ws.cell(row, self.cols["id"]).value:
                 continue
-            rec = {k: _norm(ws.cell(row, c).value) for k, c in COLS.items()}
+            rec = {k: _norm(ws.cell(row, c).value) for k, c in self.cols.items()}
             rec["row"] = row
             rec["id"] = str(rec["id"])
             self.members.append(rec)
@@ -173,6 +240,7 @@ class MinistryExcel:
 
         return {
             "sheet": self.sheet_name,
+            "layout": self.layout,
             "title": self.title,
             "date_range": self.date_range,
             "current_members": self.current_members,
@@ -209,9 +277,35 @@ class MinistryExcel:
             "unpaid_members": [o["name"] for o in active if not o["fee_date"]],
         }
 
+    def to_ministry_stats(self) -> dict:
+        """轉成與 Grafana API 相同的 {category: {goal,value,diff,rate}} 形狀。
+
+        官方匯出檔的 Row 5 就有**年度目標**，這是 Grafana `gideons_goal1`
+        缺 2027 資料時拿不到的東西，所以上傳這份檔即可補齊目標欄。
+        """
+        field_to_category = {
+            "members_brother": "增加弟兄", "members_sister": "增加姊妹",
+            "fee_brother": "弟兄會費", "fee_sister": "姊妹會費",
+            "bible_brother": "弟兄聖奉", "bible_sister": "姊妹聖奉",
+            "church_count": "教會見證", "church_offering": "教會聖奉",
+            "scripture_total": "贈送聖經", "scripture_sister": "姊妹贈經",
+        }
+        out = {}
+        for field, category in field_to_category.items():
+            goal = _num(self.summary["target"].get(field)) or None
+            val = _num(self.summary["actual"].get(field))
+            if goal is None and not val:
+                continue
+            diff = (val - goal) if goal is not None else None
+            rate = (val / goal) if goal else None
+            out[category] = {"goal": goal, "value": val,
+                             "diff": diff, "rate": rate}
+        return out
+
     def to_model(self) -> dict:
         return {
             "ministry_stats": self.summary,
+            "ministry_stats_api": self.to_ministry_stats(),
             "offerings": self.offerings(),
             "church_testimony": self.churches(),
             "analysis": self.analysis(),

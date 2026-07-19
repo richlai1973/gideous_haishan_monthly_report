@@ -99,13 +99,14 @@ def generate_all(work_dir: str, meta: Meta, excel_path: str | None = None,
         # API 資料優先於 Excel（新財年 Excel 產不出來，API 才有正確數字）
         api_stats = (model.get("ministry_stats_api") or None)
         api_churches = (model.get("church_testimony_api") or None)
+        src = (model.get("_sources") or [""])[-1]
 
         try:
             if num == 1:
                 notes += _update_agenda(doc, meta, model)
             elif num == 2:
                 if api_stats:
-                    notes += _update_ministry_from_api(doc, api_stats)
+                    notes += _update_ministry_from_api(doc, api_stats, src)
                 elif data:
                     notes += _update_ministry(doc, data)
             elif num == 4 and data:
@@ -185,7 +186,7 @@ def _fmt_stat(key: str, val, unit: str) -> str:
     return f"{val}{unit}"
 
 
-def _update_ministry_from_api(doc, stats: dict) -> list[str]:
+def _update_ministry_from_api(doc, stats: dict, source: str = "") -> list[str]:
     """-2 事工成果統計表：以 Grafana API 的 category 資料填四列。
 
     新財年目標未設定時 goal=None，目標／差額／達成率填「-」，
@@ -220,9 +221,11 @@ def _update_ministry_from_api(doc, stats: dict) -> list[str]:
 
     act = {c: (stats.get(c) or {}).get("value") for c in
            ("弟兄會費", "姊妹會費", "教會聖奉", "贈送聖經")}
-    notes.append(f"四列共 {filled} 欄取自 Grafana API"
+    notes.append(f"四列共 {filled} 欄已套用{('（來源：' + source + '）') if source else ''}"
                  f"（成果：會費 {act['弟兄會費']}/{act['姊妹會費']}、"
                  f"教會聖奉 {act['教會聖奉']}、贈經 {act['贈送聖經']}）")
+    if stats and any(v["goal"] is not None for v in stats.values()):
+        notes.append("✅ 年度目標已帶入，差額與達成率同步更新")
     if missing:
         notes.append(f"下列項目本財年查無資料，已填「-」：{'、'.join(missing)}")
     if stats and all(v["goal"] is None for v in stats.values()):
