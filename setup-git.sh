@@ -15,13 +15,15 @@ cd "$(dirname "$0")"
 # 清掉沙箱留下的殘骸
 rm -rf .git .gitclone ztest.tmp
 
-if [ -f "$BUNDLE" ] && git bundle verify "$BUNDLE" >/dev/null 2>&1; then
+# 註：不用 `git bundle verify`——它需要既有 repo 才能執行，
+#     此時 .git 剛被刪掉，必定失敗。直接試 clone 才是可靠的判斷。
+if [ -f "$BUNDLE" ] && git clone -q -b main "$BUNDLE" .gitclone 2>/dev/null; then
   echo "▸ 由 $BUNDLE 還原完整開發歷史…"
-  git clone -q -b main "$BUNDLE" .gitclone
   mv .gitclone/.git .git
   rm -rf .gitclone
   git checkout -q main
 else
+  rm -rf .gitclone
   echo "▸ 找不到可用的 bundle，改建立單一 commit…"
   git init -q
   git branch -M main
