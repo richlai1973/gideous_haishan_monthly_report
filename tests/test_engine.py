@@ -278,6 +278,42 @@ def test_secret_changes_with_password(monkeypatch):
     assert not a.valid_token(old)
 
 
+# ── 儲存層：年度贈經計畫 ──────────────────────────────────
+def test_local_plan_lookup_and_save(tmp_path):
+    """本機版從「贈經計畫」資料夾找檔；上傳後應立刻找得到。"""
+    from engine.storage import LocalStorage, plan_filename
+    base, plans = tmp_path / "base", tmp_path / "plans"
+    s = LocalStorage(base, plans)
+    assert s.find_plan("2026-2027") is None
+
+    src = tmp_path / "上傳.xlsx"
+    src.write_bytes(b"PK\x03\x04dummy")
+    dst = s.save_plan("2026-2027", src)
+    assert dst.name == plan_filename("2026-2027")
+    assert s.find_plan("2026-2027") == dst
+    assert s.find_plan("2027-2028") is None      # 別的年度不該誤中
+
+
+def test_local_plan_dir_defaults_beside_base(tmp_path):
+    from engine.storage import PLAN_FOLDER, LocalStorage
+    s = LocalStorage(tmp_path / "海山支會")
+    assert s.plan_dir == tmp_path / "海山支會" / PLAN_FOLDER
+
+
+def test_drive_plan_degrades_without_credentials():
+    """Drive 沒授權時 find_plan 要回 None 而非拋例外（狀態頁才不會 500）。"""
+    from engine.storage import DriveStorage
+
+    class Broken:
+        def __getattr__(self, name):
+            def boom(*a, **k):
+                raise RuntimeError("尚未授權")
+            return boom
+
+    s = DriveStorage(Broken(), tmp_root="/tmp/gideons-test-plan")
+    assert s.find_plan("2026-2027") is None
+
+
 def test_api_stats_shape():
     """ministry_stats 需算出 diff/rate；目標未設定時為 None。"""
     grafana.query = lambda sql, fy: [

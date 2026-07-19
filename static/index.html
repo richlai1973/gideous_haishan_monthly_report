@@ -185,6 +185,16 @@
       <p class="hint">贈經排程、臨時動議、輪值調整。只重繪受影響文件，不覆蓋已人工編輯內容。</p>
       <div class="drop" data-mod="other">拖曳或點擊上傳檔案</div>
       <div id="out-other"></div>
+
+      <div class="card" style="background:#fbfcfd;margin-top:14px">
+        <b>年度贈經計畫</b> <span class="badge" id="plan-badge">—</span>
+        <p class="hint" id="plan-hint">整個財年固定的學校配送排程，一年上傳一次即可。</p>
+        <div class="bar">
+          <input type="file" id="plan-file" accept=".xlsx,.xls">
+          <button id="btn-plan" class="ghost">上傳計畫</button>
+        </div>
+        <div id="out-plan"></div>
+      </div>
     </div>
 
     <div class="pane" id="p6">
@@ -249,8 +259,15 @@ async function refresh() {
     <div><b>財年 (var-year)</b>${m.fiscal_year}</div>
     <div><b>範本資料夾</b>${s.template_exists ? '✅ 已就緒' : '⚠️ 不存在'}</div>
     <div><b>工作資料夾</b>${s.work_dir_exists ? '✅ ' + m.work_dir_name : '尚未建立'}</div>
-    <div><b>年度贈經計畫</b>${s.distribution_plan.exists ? '✅ ' + m.period : '⚠️ 待上傳'}</div>
+    <div><b>年度贈經計畫</b>${s.distribution_plan.exists ? '✅ ' + m.period : '⚠️ 待上傳（模組⑤）'}</div>
     <div><b>Drive 目標</b>${m.drive_folder_name}</div>`;
+
+  const dp = s.distribution_plan;
+  $('#plan-badge').textContent = dp.exists ? `✅ ${dp.period}` : '⚠️ 待上傳';
+  $('#plan-badge').className = 'badge ' + (dp.exists ? 'ok' : 'warn');
+  $('#plan-hint').textContent = dp.exists
+    ? `已存在：${dp.path}`
+    : `整個財年固定的學校配送排程，一年上傳一次。存放位置：${dp.source}`;
 
   $('#ready').textContent = s.ready ? `● ${s.ready} 份就緒` : '尚未產生';
   $('#ready').className = 'badge ' + (s.ready === 10 ? 'ok' : s.ready ? 'warn' : '');
@@ -386,6 +403,25 @@ async function commit(id) {
     refresh();
   } catch (e) { alert(e.message); }
 }
+
+// ── 年度贈經計畫 ──────────────────────────────────────
+$('#btn-plan').onclick = async (e) => {
+  const f = $('#plan-file').files[0];
+  if (!f) { alert('請先選擇 Excel 檔'); return; }
+  e.target.disabled = true; e.target.textContent = '上傳中…';
+  const fd = new FormData();
+  fd.append('year', Y()); fd.append('month', M()); fd.append('file', f);
+  try {
+    const r = await api('/api/plan/upload', { method: 'POST', body: fd });
+    $('#out-plan').innerHTML = `<p class="badge ok">已存入 ${esc(r.period)} 年度計畫
+      —— ${esc(r.file)}（${r.storage === 'drive' ? 'Google Drive' : '本機'}）</p>
+      <p class="hint">工作表：${r.sheets.map(esc).join('、')}</p>`;
+    refresh();
+  } catch (err) {
+    $('#out-plan').innerHTML = `<p class="badge err">${esc(err.message)}</p>`;
+  }
+  e.target.disabled = false; e.target.textContent = '上傳計畫';
+};
 
 // ── 自動下載成果表（下載 → 審閱 → 確認套用）──────────────
 let FETCHED = null;

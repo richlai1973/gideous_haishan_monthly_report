@@ -44,13 +44,39 @@ class Storage:
         """把工作區產出送到最終位置。本機版不需要動作。"""
         return {"published": False}
 
+    def find_plan(self, period: str) -> Path | None:
+        """年度贈經計畫（整個財年固定的學校配送排程）。找不到回傳 None。"""
+        raise NotImplementedError
+
+    def save_plan(self, period: str, src: Path) -> Path:
+        """存入新年度的贈經計畫。"""
+        raise NotImplementedError
+
 
 # ── 本機 ─────────────────────────────────────────────────
+PLAN_FOLDER = "贈經計畫"
+
+
+def plan_filename(period: str) -> str:
+    return f"{period}_聖經配送計畫.xlsx"
+
+
 class LocalStorage(Storage):
     mode = "local"
 
-    def __init__(self, base_dir: str | Path):
+    def __init__(self, base_dir: str | Path, plan_dir: str | Path | None = None):
         self.base = Path(base_dir)
+        self.plan_dir = Path(plan_dir) if plan_dir else self.base / PLAN_FOLDER
+
+    def find_plan(self, period: str) -> Path | None:
+        p = self.plan_dir / plan_filename(period)
+        return p if p.exists() else None
+
+    def save_plan(self, period: str, src: Path) -> Path:
+        self.plan_dir.mkdir(parents=True, exist_ok=True)
+        dst = self.plan_dir / plan_filename(period)
+        shutil.copy2(src, dst)
+        return dst
 
     def work_dir(self, meta) -> Path:
         d = self.base / meta.work_dir_name
@@ -182,6 +208,40 @@ class DriveStorage(Storage):
         folder = self.drive.ensure_folder(meta.drive_folder_name)
         self.drive.upload_file(str(local), folder["id"], "application/json")
 
+    # ── 年度贈經計畫 ─────────────────────────────────────
+    def find_plan(self, period: str) -> Path | None:
+        """從 Drive 的「贈經計畫」資料夾取得，快取到 /tmp。
+
+        本機版讀專案旁的資料夾，那條路徑在 serverless 不存在，
+        因此雲端一律走 Drive。
+        """
+        name = plan_filename(period)
+        cached = self.tmp_root / PLAN_FOLDER / name
+        if cached.exists():
+            return cached
+
+        folder = self._safe(lambda: self.drive.find_folder(PLAN_FOLDER))
+        if not folder:
+            return None
+        fid = self._safe(lambda: self.drive.find_file(name, folder["id"]))
+        if not fid:
+            return None
+        data = self._safe(lambda: self.drive.download(fid))
+        if data is None:
+            return None
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_bytes(data)
+        return cached
+
+    def save_plan(self, period: str, src: Path) -> Path:
+        folder = self.drive.ensure_folder(PLAN_FOLDER)
+        staged = self.tmp_root / PLAN_FOLDER / plan_filename(period)
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        if Path(src) != staged:
+            shutil.copy2(src, staged)
+        self.drive.upload_file(str(staged), folder["id"])
+        return staged
+
     # ── 上傳產出 ─────────────────────────────────────────
     def publish(self, meta) -> dict:
         wd = self.work_dir(meta)
@@ -194,9 +254,9 @@ class DriveStorage(Storage):
 
 
 # ── 建立 ─────────────────────────────────────────────────
-def make_storage(mode: str, base_dir, drive_client) -> Storage:
+def make_storage(mode: str, base_dir, drive_client, plan_dir=None) -> Storage:
     if mode == "drive":
         if drive_client is None:
             raise RuntimeError("STORAGE=drive 但未提供 Drive 用戶端")
         return DriveStorage(drive_client)
-    return LocalStorage(base_dir)
+    return LocalStorage(base_dir, plan_dir)

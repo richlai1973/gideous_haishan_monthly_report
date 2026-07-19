@@ -58,7 +58,7 @@ drive = DriveClient(str(CRED_DIR), os.environ.get("GIDEONS_DRIVE_PARENT", DEFAUL
 
 # 儲存層：local（本機資料夾）或 drive（雲端，無持久磁碟）
 STORAGE_MODE = os.environ.get("STORAGE", "drive" if auth.is_cloud() else "local")
-store = make_storage(STORAGE_MODE, BASE_DIR, drive)
+store = make_storage(STORAGE_MODE, BASE_DIR, drive, PLAN_DIR)
 
 # ── 密碼保護 ─────────────────────────────────────────────
 OPEN_PATHS = {"/login", "/api/login", "/api/auth-status", "/favicon.ico"}
@@ -182,7 +182,7 @@ def status(year: int | None = None, month: int | None = None):
                           "num": gen.file_number(os.path.basename(p)),
                           "size": os.path.getsize(p),
                           "mtime": os.path.getmtime(p)})
-    plan = PLAN_DIR / f"{meta.period}_聖經配送計畫.xlsx"
+    plan = store.find_plan(meta.period)
     return {
         "meta": meta.to_dict(),
         "storage": STORAGE_MODE,
@@ -196,8 +196,12 @@ def status(year: int | None = None, month: int | None = None):
         "ready": len(files),
         "latest_fiscal_year": latest_fiscal_year(),
         "dashboard_url": dashboard_url(meta.fiscal_year),
-        "distribution_plan": {"path": str(plan), "exists": plan.exists(),
-                              "period": meta.period},
+        "distribution_plan": {"path": str(plan) if plan else None,
+                              "exists": plan is not None,
+                              "period": meta.period,
+                              "source": "Drive「贈經計畫」資料夾"
+                                        if STORAGE_MODE == "drive"
+                                        else str(PLAN_DIR)},
         "drive": drive.status(),
         "storage_ready": (store.ready() if hasattr(store, "ready") else (True, "本機")),
         "model": store.load_model(meta) or None,
@@ -422,6 +426,42 @@ def api_generate(req: GenReq):
         except Exception as exc:
             res["publish"] = {"published": False, "error": str(exc)}
     return res
+
+
+@app.post("/api/plan/upload")
+async def api_plan_upload(year: int = Form(...), month: int = Form(...),
+                          period: str = Form(""), file: UploadFile = File(...)):
+    """上傳年度贈經計畫（整個財年固定的學校配送排程）。
+
+    本機存到「贈經計畫」資料夾；雲端存到 Drive 的同名資料夾——
+    該資料夾在專案之外，不會隨 repo 部署，所以雲端必須另外上傳一次。
+    """
+    meta = _meta(year, month)
+    period = period.strip() or meta.period
+    if not file.filename.lower().endswith((".xlsx", ".xls")):
+        raise HTTPException(400, "年度贈經計畫需為 Excel 檔")
+
+    tmp = _work_dir(year, month) / "_inputs" / file.filename
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    with open(tmp, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        dest = store.save_plan(period, tmp)
+    except Exception as exc:
+        raise HTTPException(502, f"儲存失敗：{exc}")
+
+    # 簡單檢核：讀得到工作表就算通過
+    sheets = []
+    try:
+        import openpyxl
+        sheets = openpyxl.load_workbook(str(dest), read_only=True).sheetnames
+    except Exception as exc:
+        raise HTTPException(422, f"檔案已存入但無法讀取：{exc}")
+
+    return {"ok": True, "period": period, "file": os.path.basename(str(dest)),
+            "path": str(dest), "sheets": sheets,
+            "storage": STORAGE_MODE}
 
 
 @app.post("/api/publish")
