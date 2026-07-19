@@ -26,7 +26,8 @@ from engine import grafana
 from engine.dates import build_meta, dashboard_url, default_report_month, latest_fiscal_year
 from engine.drive import DEFAULT_PARENT_ID, DriveClient, DriveNotConfigured
 from engine.parse_files import SUPPORTED, parse_file
-from models.model import AFFECTED_DOCS, load_model, merge, save_model
+from engine.storage import make_storage
+from models.model import AFFECTED_DOCS, merge
 
 APP_DIR = Path(__file__).parent
 
@@ -44,8 +45,12 @@ CRED_DIR = Path(os.environ.get("GIDEONS_CRED_DIR", APP_DIR / "credentials"))
 PLAN_DIR = Path(os.environ.get("GIDEONS_PLAN_DIR",
                                APP_DIR.parent / "贈經計畫"))
 
-app = FastAPI(title="基甸會海山支會 月例會報告產出系統", version="1.0")
+app = FastAPI(title="基甸會海山支會 月例會報告產出系統", version="1.1")
 drive = DriveClient(str(CRED_DIR), os.environ.get("GIDEONS_DRIVE_PARENT", DEFAULT_PARENT_ID))
+
+# 儲存層：local（本機資料夾）或 drive（雲端，無持久磁碟）
+STORAGE_MODE = os.environ.get("STORAGE", "drive" if auth.is_cloud() else "local")
+store = make_storage(STORAGE_MODE, BASE_DIR, drive)
 
 # ── 密碼保護 ─────────────────────────────────────────────
 OPEN_PATHS = {"/login", "/api/login", "/api/auth-status", "/favicon.ico"}
@@ -146,7 +151,8 @@ def _meta(year: int, month: int, meeting_date: str | None = None):
 
 
 def _work_dir(year: int, month: int) -> Path:
-    return BASE_DIR / f"{year}年{month}月月例會"
+    """工作區。本機＝永久資料夾；雲端＝/tmp（內容由 Drive 同步而來）。"""
+    return store.work_dir(_meta(year, month))
 
 
 def _docx_paths(work_dir: Path, meta) -> list[str]:
@@ -171,12 +177,13 @@ def status(year: int | None = None, month: int | None = None):
     plan = PLAN_DIR / f"{meta.period}_聖經配送計畫.xlsx"
     return {
         "meta": meta.to_dict(),
-        "base_dir": str(BASE_DIR),
-        "base_dir_exists": BASE_DIR.exists(),
+        "storage": STORAGE_MODE,
+        "base_dir": str(BASE_DIR) if STORAGE_MODE == "local" else "Google Drive",
+        "base_dir_exists": BASE_DIR.exists() if STORAGE_MODE == "local" else True,
         "work_dir": str(wd),
         "work_dir_exists": wd.exists(),
-        "template_dir": str(BASE_DIR / f"{meta.prev_year}年{meta.prev_month}月月例會"),
-        "template_exists": (BASE_DIR / f"{meta.prev_year}年{meta.prev_month}月月例會").exists(),
+        "template_dir": str(_tpl) if (_tpl := store.template_dir(meta)) else None,
+        "template_exists": _tpl is not None,
         "files": files,
         "ready": len(files),
         "latest_fiscal_year": latest_fiscal_year(),
@@ -184,7 +191,8 @@ def status(year: int | None = None, month: int | None = None):
         "distribution_plan": {"path": str(plan), "exists": plan.exists(),
                               "period": meta.period},
         "drive": drive.status(),
-        "model": load_model(str(wd)) if wd.exists() else None,
+        "storage_ready": (store.ready() if hasattr(store, "ready") else (True, "本機")),
+        "model": store.load_model(meta) or None,
         "supported_ext": sorted(SUPPORTED),
     }
 
@@ -199,12 +207,16 @@ class InitReq(BaseModel):
 @app.post("/api/init")
 def api_init(req: InitReq):
     meta = _meta(req.year, req.month, req.meeting_date)
-    res = gen.init_month(str(BASE_DIR), meta)
+    tpl = store.template_dir(meta)
+    if tpl is None:
+        raise HTTPException(400, f"找不到 {meta.prev_year}年{meta.prev_month}月 的範本")
+    res = gen.init_month(str(_work_dir(req.year, req.month).parent), meta,
+                         template_dir=str(tpl))
     if not res["ok"]:
         raise HTTPException(400, res["error"])
-    model = load_model(res["work_dir"])
+    model = store.load_model(meta)
     model["meta"] = meta.to_dict()
-    save_model(res["work_dir"], model)
+    store.save_model(meta, model)
     res["meta"] = meta.to_dict()
     return res
 
@@ -358,9 +370,10 @@ def api_commit(req: CommitReq):
     wd = _work_dir(req.year, req.month)
     if not wd.exists():
         raise HTTPException(400, "尚未初始化當月工作區，請先按「產生報告」")
-    model = load_model(str(wd))
+    meta = _meta(req.year, req.month)
+    model = store.load_model(meta)
     merge(model, req.patch, req.source or req.module)
-    save_model(str(wd), model)
+    store.save_model(meta, model)
     return {"ok": True, "model": model,
             "affected_docs": AFFECTED_DOCS.get(req.module, [])}
 
@@ -377,12 +390,15 @@ class GenReq(BaseModel):
 def api_generate(req: GenReq):
     meta = _meta(req.year, req.month, req.meeting_date)
     wd = _work_dir(req.year, req.month)
-    if not wd.exists():
-        init = gen.init_month(str(BASE_DIR), meta)
+    if not any(wd.glob("*.docx")):
+        tpl = store.template_dir(meta)
+        if tpl is None:
+            raise HTTPException(400, f"找不到 {meta.prev_year}年{meta.prev_month}月 的範本")
+        init = gen.init_month(str(wd.parent), meta, template_dir=str(tpl))
         if not init["ok"]:
             raise HTTPException(400, init["error"])
 
-    model = load_model(str(wd))
+    model = store.load_model(meta)
     excel = wd / f"事工成果表_{req.year}_{req.month:02d}.xlsx"
     res = gen.generate_all(str(wd), meta, str(excel) if excel.exists() else None, model)
     if not res["ok"]:
@@ -390,7 +406,24 @@ def api_generate(req: GenReq):
     if req.only:
         res["results"] = [r for r in res["results"] if r["num"] in req.only]
     res["meta"] = meta.to_dict()
+
+    # 雲端：/tmp 不持久，產完立刻送回 Drive
+    if STORAGE_MODE == "drive":
+        try:
+            res["publish"] = store.publish(meta)
+        except Exception as exc:
+            res["publish"] = {"published": False, "error": str(exc)}
     return res
+
+
+@app.post("/api/publish")
+def api_publish(req: GenReq):
+    """把工作區產出送到最終位置（雲端＝上傳 Drive）。"""
+    meta = _meta(req.year, req.month)
+    try:
+        return store.publish(meta)
+    except Exception as exc:
+        raise HTTPException(502, f"發布失敗：{exc}")
 
 
 # ── API：分析檢視（事工成果表）──────────────────────────

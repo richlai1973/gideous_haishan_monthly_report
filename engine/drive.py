@@ -61,8 +61,34 @@ class DriveClient:
         }
 
     # ── 授權 ─────────────────────────────────────────────
+    def _creds_from_env(self):
+        """雲端用：純環境變數建立憑證，不碰檔案系統。
+
+        Vercel 沒有持久磁碟也無法開瀏覽器，因此把本機授權好的
+        refresh token 放進環境變數，直接換取 access token。
+        """
+        _, Credentials, _, _, _ = _import_libs()
+        cid = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+        secret = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+        refresh = os.environ.get("GOOGLE_REFRESH_TOKEN", "").strip()
+        if not (cid and secret and refresh):
+            return None
+        return Credentials(
+            token=None, refresh_token=refresh, client_id=cid,
+            client_secret=secret, scopes=SCOPES,
+            token_uri="https://oauth2.googleapis.com/token")
+
     def authorize(self, interactive: bool = True):
         Request, Credentials, InstalledAppFlow, build, _ = _import_libs()
+
+        # 優先走環境變數（雲端）
+        creds = self._creds_from_env()
+        if creds is not None:
+            creds.refresh(Request())
+            self._service = build("drive", "v3", credentials=creds,
+                                  cache_discovery=False)
+            return self._service
+
         creds = None
         if os.path.exists(self.token_path):
             creds = Credentials.from_authorized_user_file(self.token_path, SCOPES)
@@ -92,6 +118,44 @@ class DriveClient:
         if self._service is None:
             self.authorize(interactive=False)
         return self._service
+
+    # ── 查詢與下載（儲存層用）─────────────────────────────
+    def find_folder(self, name: str, parent_id: str | None = None) -> dict | None:
+        parent = parent_id or self.parent_id
+        safe = name.replace("'", "\\'")
+        q = (f"name = '{safe}' and mimeType = '{FOLDER_MIME}' "
+             f"and '{parent}' in parents and trashed = false")
+        files = self.service.files().list(
+            q=q, fields="files(id,name)", pageSize=1,
+            supportsAllDrives=True, includeItemsFromAllDrives=True
+        ).execute().get("files", [])
+        return files[0] if files else None
+
+    def find_file(self, name: str, folder_id: str) -> str | None:
+        safe = name.replace("'", "\\'")
+        q = f"name = '{safe}' and '{folder_id}' in parents and trashed = false"
+        files = self.service.files().list(
+            q=q, fields="files(id)", pageSize=1,
+            supportsAllDrives=True, includeItemsFromAllDrives=True
+        ).execute().get("files", [])
+        return files[0]["id"] if files else None
+
+    def list_files(self, folder_id: str) -> list[dict]:
+        out, token = [], None
+        while True:
+            res = self.service.files().list(
+                q=f"'{folder_id}' in parents and trashed = false",
+                fields="nextPageToken, files(id,name,mimeType,size)",
+                pageSize=200, pageToken=token,
+                supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+            out += res.get("files", [])
+            token = res.get("nextPageToken")
+            if not token:
+                return out
+
+    def download(self, file_id: str) -> bytes:
+        return self.service.files().get_media(
+            fileId=file_id, supportsAllDrives=True).execute()
 
     # ── 資料夾 ───────────────────────────────────────────
     def ensure_folder(self, name: str, parent_id: str | None = None) -> dict:
