@@ -68,6 +68,10 @@
 <header>
   <h1>國際基甸會 海山支會 · 月例會報告產出系統</h1>
   <span class="sub" id="hdr-sub"></span>
+  <span style="margin-left:auto;display:flex;gap:10px;align-items:center">
+    <span class="sub" id="pw-warn" style="color:#ffd7a8"></span>
+    <a href="#" id="logout" class="sub" style="color:#fff;display:none">登出</a>
+  </span>
 </header>
 
 <div class="wrap">
@@ -547,6 +551,20 @@ $('#btn-drive').onclick = async (e) => {
   $('#year').value = now.getFullYear();
   $('#month').value = now.getMonth() + 1;
   $('#year').onchange = $('#month').onchange = () => { $('#meeting').value = ''; refresh(); };
+  // 登入狀態與密碼強度提醒
+  try {
+    const a = await api('/api/auth-status');
+    if (a.logged_in) {
+      $('#logout').style.display = 'inline';
+      $('#logout').onclick = async e => {
+        e.preventDefault();
+        await fetch('/api/logout', { method: 'POST' });
+        location.href = '/login';
+      };
+    }
+    if (a.warning) $('#pw-warn').textContent = '⚠ ' + a.warning.split('，')[0];
+  } catch (e) { /* 未啟用驗證 */ }
+
   await refresh();
   $('#fy').value = STATE.meta.fiscal_year;
   $('#tw-fy').textContent = STATE.meta.fiscal_year;

@@ -14,11 +14,13 @@ import zipfile
 from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from engine import auth
 from engine import generate as gen
 from engine import grafana
 from engine.dates import build_meta, dashboard_url, default_report_month, latest_fiscal_year
@@ -27,6 +29,15 @@ from engine.parse_files import SUPPORTED, parse_file
 from models.model import AFFECTED_DOCS, load_model, merge, save_model
 
 APP_DIR = Path(__file__).parent
+
+# 本機 .env（已被 .gitignore 排除）；雲端則直接用平台的環境變數
+_env_file = APP_DIR / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
 BASE_DIR = Path(os.environ.get("GIDEONS_BASE_DIR",
                                Path.home() / "Documents" / "海山支會"))
 CRED_DIR = Path(os.environ.get("GIDEONS_CRED_DIR", APP_DIR / "credentials"))
@@ -35,6 +46,98 @@ PLAN_DIR = Path(os.environ.get("GIDEONS_PLAN_DIR",
 
 app = FastAPI(title="基甸會海山支會 月例會報告產出系統", version="1.0")
 drive = DriveClient(str(CRED_DIR), os.environ.get("GIDEONS_DRIVE_PARENT", DEFAULT_PARENT_ID))
+
+# ── 密碼保護 ─────────────────────────────────────────────
+OPEN_PATHS = {"/login", "/api/login", "/api/auth-status", "/favicon.ico"}
+
+
+@app.middleware("http")
+async def require_password(request: Request, call_next):
+    """所有頁面與 API 都要通過密碼；未設定密碼且在本機則放行。"""
+    path = request.url.path
+    if path in OPEN_PATHS or path.startswith("/static/"):
+        return await call_next(request)
+
+    if not auth.auth_required():
+        return await call_next(request)
+
+    if not auth.configured_password():
+        # 雲端卻沒設密碼 → 明確擋下，不要無防護上線
+        return JSONResponse(
+            {"detail": "伺服器尚未設定 APP_PASSWORD 環境變數，為保護資料已停止服務。"},
+            status_code=503)
+
+    if auth.valid_token(request.cookies.get(auth.COOKIE)):
+        return await call_next(request)
+
+    if path.startswith("/api/"):
+        return JSONResponse({"detail": "需要登入"}, status_code=401)
+    return HTMLResponse(LOGIN_HTML, status_code=401)
+
+
+@app.get("/api/auth-status")
+def auth_status(request: Request):
+    return {
+        "required": auth.auth_required(),
+        "configured": auth.configured_password() is not None,
+        "logged_in": auth.valid_token(request.cookies.get(auth.COOKIE)),
+        "cloud": auth.is_cloud(),
+        "warning": auth.password_strength_warning(),
+    }
+
+
+class LoginReq(BaseModel):
+    password: str
+
+
+@app.post("/api/login")
+def api_login(req: LoginReq, response: Response):
+    if not auth.check_password(req.password):
+        raise HTTPException(401, "密碼錯誤")
+    response.set_cookie(
+        auth.COOKIE, auth.issue_token(), max_age=auth.MAX_AGE,
+        httponly=True, samesite="lax", secure=auth.is_cloud(), path="/")
+    return {"ok": True}
+
+
+@app.post("/api/logout")
+def api_logout(response: Response):
+    response.delete_cookie(auth.COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page():
+    return LOGIN_HTML
+
+
+LOGIN_HTML = """<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>基甸會海山支會 月例會報告</title><style>
+body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
+ background:#f6f7f9;font:15px/1.6 -apple-system,"PingFang TC","Noto Sans TC",sans-serif}
+.box{background:#fff;border:1px solid #e3e6ea;border-radius:10px;padding:28px 32px;
+ width:330px;text-align:center}
+h1{font-size:16px;margin:0 0 4px;color:#1f4e79}
+p{font-size:12px;color:#6b7684;margin:0 0 18px}
+input{width:100%;padding:9px 11px;border:1px solid #e3e6ea;border-radius:6px;
+ font:inherit;box-sizing:border-box}
+button{width:100%;margin-top:10px;padding:9px;border:0;border-radius:6px;
+ background:#1f4e79;color:#fff;font:inherit;cursor:pointer}
+button:hover{background:#2e6ca4}
+.err{color:#b3261e;font-size:12px;margin-top:10px;min-height:16px}
+</style></head><body><div class="box">
+<h1>國際基甸會 海山支會</h1><p>月例會報告產出系統</p>
+<input id="pw" type="password" placeholder="請輸入密碼" autofocus>
+<button id="go">登入</button><div class="err" id="err"></div>
+<script>
+const go=async()=>{document.getElementById('err').textContent='';
+ const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({password:document.getElementById('pw').value})});
+ if(r.ok){location.href='/';}else{document.getElementById('err').textContent='密碼錯誤';}};
+document.getElementById('go').onclick=go;
+document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
+</script></div></body></html>"""
 
 
 # ── 共用 ─────────────────────────────────────────────────

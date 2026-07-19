@@ -1,4 +1,7 @@
-# 憑證與權杖 — 絕不進版控
+# 憑證、密碼與權杖 — 絕不進版控
+.env
+.env.*
+!.env.example
 credentials/
 *.json
 !package.json

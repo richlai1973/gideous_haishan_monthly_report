@@ -220,6 +220,64 @@ def test_grafana_layout_still_detected(tmp_path):
     assert mx.summary["actual"]["fee_brother"] == 24
 
 
+# ── 密碼保護 ─────────────────────────────────────────────
+def _auth(monkeypatch, password=None, cloud=False):
+    import importlib
+    from engine import auth
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+    monkeypatch.delenv("VERCEL", raising=False)
+    if password:
+        monkeypatch.setenv("APP_PASSWORD", password)
+    if cloud:
+        monkeypatch.setenv("VERCEL", "1")
+    importlib.reload(auth)
+    return auth
+
+
+def test_auth_off_when_local_and_unset(monkeypatch):
+    a = _auth(monkeypatch)
+    assert a.auth_required() is False
+
+
+def test_auth_forced_on_cloud_even_without_password(monkeypatch):
+    """雲端沒設密碼時必須擋下，不能無防護上線。"""
+    a = _auth(monkeypatch, cloud=True)
+    assert a.auth_required() is True
+    assert a.configured_password() is None
+
+
+def test_token_rejects_tampering(monkeypatch):
+    a = _auth(monkeypatch, "correct-horse")
+    good = a.issue_token()
+    assert a.valid_token(good)
+    exp, _, sig = good.partition(".")
+    assert not a.valid_token(f"{exp}.{'0' * len(sig)}")   # 簽章竄改
+    assert not a.valid_token(f"9999999999.{sig}")          # 延長效期
+    assert not a.valid_token(f"1000000000.{sig}")          # 已過期
+    for bad in ("", "garbage", "1.2.3", None):
+        assert not a.valid_token(bad)
+
+
+def test_password_check_and_strength(monkeypatch):
+    a = _auth(monkeypatch, "correct-horse")
+    assert a.check_password("correct-horse")
+    assert not a.check_password("Correct-Horse")
+    assert not a.check_password("")
+    assert a.password_strength_warning() is None
+
+    # 組織名／短密碼要被標記為弱（不在此處寫出實際使用的密碼）
+    assert _auth(monkeypatch, "gideons").password_strength_warning() is not None
+    assert _auth(monkeypatch, "abc123").password_strength_warning() is not None
+
+
+def test_secret_changes_with_password(monkeypatch):
+    """換密碼後舊 token 必須失效。"""
+    a = _auth(monkeypatch, "first-password")
+    old = a.issue_token()
+    a = _auth(monkeypatch, "second-password")
+    assert not a.valid_token(old)
+
+
 def test_api_stats_shape():
     """ministry_stats 需算出 diff/rate；目標未設定時為 None。"""
     grafana.query = lambda sql, fy: [
