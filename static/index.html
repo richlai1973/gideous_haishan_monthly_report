@@ -413,9 +413,25 @@ $('#btn-plan').onclick = async (e) => {
   fd.append('year', Y()); fd.append('month', M()); fd.append('file', f);
   try {
     const r = await api('/api/plan/upload', { method: 'POST', body: fd });
-    $('#out-plan').innerHTML = `<p class="badge ok">已存入 ${esc(r.period)} 年度計畫
-      —— ${esc(r.file)}（${r.storage === 'drive' ? 'Google Drive' : '本機'}）</p>
-      <p class="hint">工作表：${r.sheets.map(esc).join('、')}</p>`;
+    $('#out-plan').innerHTML = `
+      <p class="badge ok">已存入並解析 ${esc(r.period)} 年度計畫 —— ${esc(r.file)}
+        （${r.storage === 'drive' ? 'Google Drive' : '本機'}）· 全年 ${r.total} 場</p>
+      ${r.warnings.length ? `<p class="hint">⚠️ ${r.warnings.map(esc).join('<br>⚠️ ')}</p>` : ''}
+      <h3 style="margin-top:12px">本月場次（${r.this_month.length}）— 會寫入 -6 學校贈經統計表</h3>
+      ${r.this_month.length ? `<table><tr><th>日期</th><th>項目</th><th>學校</th>
+        <th>星期</th><th>時間</th><th>狀態</th></tr>
+        ${r.this_month.map(s => `<tr><td>${esc(s.date || s.date_raw)}</td>
+          <td>${esc(s.kind)}</td><td>${esc(s.school)}</td><td>${esc(s.weekday)}</td>
+          <td>${esc(s.time)}</td><td>${esc(s.status)}</td></tr>`).join('')}</table>`
+        : '<p class="hint">本月無學校場次。</p>'}
+      <h3 style="margin-top:12px">全年排程</h3>
+      <details><summary>展開 ${r.total} 場</summary>
+        <table><tr><th>#</th><th>日期</th><th>項目</th><th>學校</th><th>時間</th><th>狀態</th></tr>
+        ${r.schools.map(s => `<tr><td>${s.no ?? '-'}</td>
+          <td>${esc(s.date || s.date_raw)}</td><td>${esc(s.kind)}</td>
+          <td>${esc(s.school)}</td><td>${esc(s.time)}</td>
+          <td>${esc(s.status)}</td></tr>`).join('')}</table></details>
+      <p class="hint" style="margin-top:8px">已寫入資料模型，按上方「產生報告」即會套用到 -5 -6。</p>`;
     refresh();
   } catch (err) {
     $('#out-plan').innerHTML = `<p class="badge err">${esc(err.message)}</p>`;

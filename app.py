@@ -451,17 +451,29 @@ async def api_plan_upload(year: int = Form(...), month: int = Form(...),
     except Exception as exc:
         raise HTTPException(502, f"儲存失敗：{exc}")
 
-    # 簡單檢核：讀得到工作表就算通過
-    sheets = []
+    # 解析並寫入資料模型——只存檔不解析的話，-6 不會有任何變化
+    from engine.parse_plan import parse as parse_plan
     try:
-        import openpyxl
-        sheets = openpyxl.load_workbook(str(dest), read_only=True).sheetnames
+        plan = parse_plan(str(dest), period)
     except Exception as exc:
-        raise HTTPException(422, f"檔案已存入但無法讀取：{exc}")
+        raise HTTPException(422, f"檔案已存入但解析失敗：{exc}")
+    if not plan["schools"]:
+        raise HTTPException(
+            422, "；".join(plan["warnings"]) or f"找不到 {period} 年度的排程")
+
+    model = store.load_model(meta)
+    merge(model, {"distribution_plan": plan}, f"贈經計畫:{period}")
+    store.save_model(meta, model)
+
+    from engine.parse_plan import schools_of_month
+    this_month = schools_of_month(plan, meta.report_year, meta.report_month)
 
     return {"ok": True, "period": period, "file": os.path.basename(str(dest)),
-            "path": str(dest), "sheets": sheets,
-            "storage": STORAGE_MODE}
+            "path": str(dest), "storage": STORAGE_MODE,
+            "schools": plan["schools"], "total": len(plan["schools"]),
+            "this_month": this_month,
+            "warnings": plan["warnings"],
+            "affected_docs": [5, 6]}
 
 
 @app.post("/api/publish")

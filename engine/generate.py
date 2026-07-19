@@ -113,6 +113,8 @@ def generate_all(work_dir: str, meta: Meta, excel_path: str | None = None,
                 notes += _update_offerings(doc, data)
             elif num == 5:
                 notes += _update_bible_giving(doc, meta, model)
+            elif num == 6:
+                notes += _update_schools(doc, meta, model)
             elif num == 9:
                 if api_churches:
                     notes += _update_church_testimony_api(doc, api_churches, api_stats)
@@ -489,6 +491,58 @@ def _update_church_testimony_api(doc, churches: list[dict],
     left = [c["church"] for c in churches if str(c["church"]) not in used]
     if left:
         notes.append(f"⚠️ API 有但表中未列 {len(left)} 間：" + "、".join(map(str, left[:8])))
+    return notes
+
+
+def _update_schools(doc, meta: Meta, model: dict) -> list[str]:
+    """-6 學校贈經統計表：填入本月的學校場次。
+
+    來源是年度贈經計畫（整個財年固定），非 LINE。空白列才填，
+    已有內容的列一律保留——承辦人可能已手動補過實際本數與同工。
+    """
+    from .parse_plan import schools_of_month
+
+    plan = model.get("distribution_plan") or {}
+    if not plan.get("schools"):
+        return []
+
+    this_month = schools_of_month(plan, meta.report_year, meta.report_month)
+    if not this_month:
+        return [f"年度計畫中 {meta.report_month} 月無學校場次"]
+
+    table = doc.tables[0]
+    # 表頭：日期 / 學校、醫院、旅館 / 數量 / 参與同工 / 弟兄 / 姊妹
+    existing = {get_cell_text(r.cells[1]) for r in table.rows[1:]
+                if get_cell_text(r.cells[1])}
+
+    filled, skipped = 0, []
+    row_iter = (r for r in table.rows[1:] if not get_cell_text(r.cells[1]))
+    for s in this_month:
+        if s["school"] in existing:
+            skipped.append(s["school"])
+            continue
+        row = next(row_iter, None)
+        if row is None:
+            skipped.append(s["school"] + "（表格列數不足）")
+            continue
+        date_txt = s["date"][5:].replace("-", "/") if s["date"] else s["date_raw"]
+        set_cell_text(row.cells[0], date_txt)
+        set_cell_text(row.cells[1], s["school"])
+        if s["count"]:
+            set_cell_text(row.cells[2], str(int(s["count"])))
+        filled += 1
+
+    notes = []
+    if filled:
+        notes.append(f"已填入本月 {filled} 場學校贈經："
+                     + "、".join(s["school"] for s in this_month)[:60])
+    if skipped:
+        notes.append(f"略過 {len(skipped)} 筆（表中已有或空列不足）："
+                     + "、".join(skipped[:5]))
+    for s in this_month:
+        if s["status"] != "已排定":
+            notes.append(f"⚠️ {s['school']}：{s['status']}（{s['date_raw'] or '無日期'}）")
+    notes.append("數量與參與同工需人工補齊")
     return notes
 
 

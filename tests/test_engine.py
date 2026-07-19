@@ -314,6 +314,90 @@ def test_drive_plan_degrades_without_credentials():
     assert s.find_plan("2026-2027") is None
 
 
+# ── 年度贈經計畫解析 ─────────────────────────────────────
+def _make_plan_xlsx(path):
+    """仿實際版面：歷年區塊並排，第 1 列年度標題、第 2 列欄位標頭。"""
+    import datetime as dt
+
+    from openpyxl import Workbook
+    wb = Workbook(); ws = wb.active; ws.title = "配送計畫"
+    # 舊年度區塊（欄 1-7），確保不會被誤抓
+    ws.cell(1, 2, "2025-2026年度學校(2025/6/1-2026/5/31)贈經計畫規劃")
+    for i, h in enumerate(["月份", "No", "贈經日期", "項目", "學校", "星期", "時間"]):
+        ws.cell(2, 1 + i, h)
+    ws.cell(3, 1, "9月"); ws.cell(3, 2, 1); ws.cell(3, 3, "09月18日")
+    ws.cell(3, 5, "舊年度學校")
+
+    # 目標年度區塊（欄 10 起）
+    ws.cell(1, 10, "2026-2027年度學校(2026/6/1-2027/5/31)贈經計畫規劃")
+    for i, h in enumerate(["月份", "No", "贈經日期", "項目", "學校", "星期", "時間", "贈經數"]):
+        ws.cell(2, 10 + i, h)
+    rows = [
+        ("9月", 1, "09月02日", "國高中", "北大國高中", "三", dt.time(15, 30), None),
+        (None, 2, "09月09日", "國高中", "安溪國中", "三", dt.time(15, 30), None),
+        (None, 3, "11月04日", "國高中", "中正國中", "三", dt.datetime(1900, 1, 5), None),
+        (None, 4, "01月06日", "女校", "樹人高職", "三", dt.time(15, 30), None),
+        (None, None, None, None, "鶯歌工商", None, None, None),
+        (None, 5, "06月　日", "國高中", "清水國高中畢典", None, dt.time(10, 45), None),
+    ]
+    for r, vals in enumerate(rows, start=3):
+        for i, v in enumerate(vals):
+            if v is not None:
+                ws.cell(r, 10 + i, v)
+    wb.save(path)
+
+
+def test_parse_plan_picks_right_year_block(tmp_path):
+    """歷年區塊並排，必須抓到指定財年而非最左邊那塊。"""
+    from engine.parse_plan import parse
+    p = tmp_path / "plan.xlsx"; _make_plan_xlsx(str(p))
+    plan = parse(str(p), "2026-2027")
+    names = [s["school"] for s in plan["schools"]]
+    assert "舊年度學校" not in names
+    assert "北大國高中" in names and "安溪國中" in names
+
+
+def test_parse_plan_fiscal_year_date_rollover(tmp_path):
+    """財年 6/1 起：9 月屬前一西元年，1 月屬後一年。"""
+    from engine.parse_plan import parse
+    p = tmp_path / "plan.xlsx"; _make_plan_xlsx(str(p))
+    by = {s["school"]: s for s in parse(str(p), "2026-2027")["schools"]}
+    assert by["北大國高中"]["date"] == "2026-09-02"
+    assert by["樹人高職"]["date"] == "2027-01-06"
+
+
+def test_parse_plan_flags_known_data_flaws(tmp_path):
+    """時間格式錯亂、無日期候補、只有月份——都要標記而非猜測。"""
+    from engine.parse_plan import parse
+    p = tmp_path / "plan.xlsx"; _make_plan_xlsx(str(p))
+    plan = parse(str(p), "2026-2027")
+    by = {s["school"]: s for s in plan["schools"]}
+
+    assert by["中正國中"]["time"] == ""          # 1900-01-05 不當成時間
+    assert any("中正國中" in w for w in plan["warnings"])
+    assert by["鶯歌工商"]["status"] == "待定"
+    assert by["清水國高中畢典"]["status"] == "日期待定"
+
+
+def test_parse_plan_missing_year_is_explicit(tmp_path):
+    from engine.parse_plan import parse
+    p = tmp_path / "plan.xlsx"; _make_plan_xlsx(str(p))
+    plan = parse(str(p), "2030-2031")
+    assert plan["schools"] == []
+    assert "2030-2031" in plan["warnings"][0]
+
+
+def test_schools_of_month(tmp_path):
+    from engine.parse_plan import parse, schools_of_month
+    p = tmp_path / "plan.xlsx"; _make_plan_xlsx(str(p))
+    plan = parse(str(p), "2026-2027")
+    assert [s["school"] for s in schools_of_month(plan, 2026, 9)] == \
+        ["北大國高中", "安溪國中"]
+    assert schools_of_month(plan, 2026, 7) == []
+    # 只有月份的畢典也要被 6 月撈到
+    assert [s["school"] for s in schools_of_month(plan, 2027, 6)] == ["清水國高中畢典"]
+
+
 def test_api_stats_shape():
     """ministry_stats 需算出 diff/rate；目標未設定時為 None。"""
     grafana.query = lambda sql, fy: [
