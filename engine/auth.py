@@ -75,15 +75,22 @@ def check_password(supplied: str) -> bool:
 
 
 def password_strength_warning() -> str | None:
-    """密碼太弱時回報，顯示在狀態列提醒承辦人。"""
+    """密碼太弱時回報，顯示在狀態列提醒承辦人。
+
+    刻意不列舉具體字串——這份程式碼可能公開，清單本身就會變成提示。
+    改用結構特徵判斷：單一小寫英文字、純數字、過短。
+    """
     pw = configured_password()
     if not pw:
         return None
-    weak = {"haishan", "gideons", "海山", "password", "12345678", "gideon"}
-    if pw.lower() in weak:
-        return ("目前密碼是可猜到的常見字（支會名／組織名）。"
-                "報告含具名健康資訊，建議改用隨機密碼，"
-                "例如：" + secrets.token_urlsafe(9))
+
+    suggest = "，建議改用隨機密碼，例如：" + secrets.token_urlsafe(9)
     if len(pw) < 8:
-        return "密碼短於 8 碼，建議加長。"
+        return "密碼短於 8 碼" + suggest
+    if pw.isdigit():
+        return "密碼是純數字" + suggest
+    if pw.isalpha() and pw.islower() and len(pw) <= 12:
+        # 單一小寫英文單字（組織名、地名等）字典攻擊幾秒就破
+        return ("密碼是單一小寫英文字，容易被字典攻擊猜中。"
+                "報告含具名健康資訊" + suggest)
     return None
