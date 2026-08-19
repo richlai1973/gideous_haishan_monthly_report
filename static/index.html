@@ -98,6 +98,8 @@
         <input id="next-meeting" style="width:180px" placeholder="2026/09/27下午4:00"></div>
       <div><label>下次地點</label>
         <input id="next-venue" style="width:150px" placeholder="土城清水教會"></div>
+      <div><label>製表日期（各文件標題下）</label>
+        <input id="asof" type="date" style="width:160px"></div>
       <button id="btn-init">① 初始化 / 複製範本</button>
       <button id="btn-gen" class="ghost">產生 10 份報告</button>
       <span id="ready" class="badge">—</span>
@@ -237,6 +239,11 @@ const api = async (path, opts) => {
   return j;
 };
 const Y = () => +$('#year').value, M = () => +$('#month').value;
+// 製表日用「使用者當地」的今天——雲端跑在 UTC，深夜產報告會差一天
+const today = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 const fmt = n => (n ?? 0).toLocaleString('zh-TW');
 let STATE = null, pendingModule = null;
 
@@ -323,7 +330,8 @@ $('#btn-gen').onclick = async (e) => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ year: Y(), month: M(), meeting_date: $('#meeting').value,
                              next_meeting_text: $('#next-meeting').value,
-                             next_venue: $('#next-venue').value })
+                             next_venue: $('#next-venue').value,
+                             as_of_date: $('#asof').value || today() })
     });
     $('#p1-out').innerHTML =
       `<p class="badge">範本來源：${esc(r.template_source || '—')}</p>` +
@@ -598,6 +606,7 @@ $('#btn-zip').onclick = () => location.href = `/api/download?year=${Y()}&month=$
   const now = new Date();
   $('#year').value = now.getFullYear();
   $('#month').value = now.getMonth() + 1;
+  $('#asof').value = today();          // 製表日預設今天，可改
   $('#year').onchange = $('#month').onchange = () => {
     $('#meeting').value = ''; $('#next-meeting').value = ''; refresh();
   };

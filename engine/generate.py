@@ -12,7 +12,8 @@ from docx import Document
 
 from .dates import Meta, build_meta
 from .docx_utils import (get_cell_text, iter_paragraphs, replace_text_in_doc,
-                          set_cell_text, set_paragraph_text, update_dates)
+                          set_cell_text, set_paragraph_text, update_asof_date,
+                          update_dates)
 from .parse_excel import MinistryExcel
 
 DOC_SUFFIXES = [
@@ -83,9 +84,14 @@ def init_month(base_dir: str, meta: Meta, template_dir: str | None = None) -> di
 
 # ── Step 2：逐檔更新 ─────────────────────────────────────
 def generate_all(work_dir: str, meta: Meta, excel_path: str | None = None,
-                 model: dict | None = None) -> dict:
-    """更新工作區內的 10 份 docx。回傳每份的狀態與變更紀錄。"""
+                 model: dict | None = None, as_of: date | None = None) -> dict:
+    """更新工作區內的 10 份 docx。回傳每份的狀態與變更紀錄。
+
+    `as_of` 是製表日（各文件標題下方那個日期），預設今天。雲端跑在 UTC，
+    台灣時間深夜產報告會差一天，所以介面會把使用者當地的日期送進來。
+    """
     model = model or {}
+    as_of = as_of or date.today()
     data = None
     if excel_path and os.path.exists(excel_path):
         data = MinistryExcel(excel_path)
@@ -102,6 +108,7 @@ def generate_all(work_dir: str, meta: Meta, excel_path: str | None = None,
         num = file_number(fname)
         doc = Document(path)
         log = update_dates(doc, meta)
+        log += update_asof_date(doc, as_of)
         status, notes = "ok", []
 
         # API 資料優先於 Excel（新財年 Excel 產不出來，API 才有正確數字）
@@ -140,6 +147,7 @@ def generate_all(work_dir: str, meta: Meta, excel_path: str | None = None,
         })
 
     return {"ok": True, "work_dir": work_dir, "results": results,
+            "as_of": as_of.isoformat(),
             "excel": os.path.basename(excel_path) if excel_path else None}
 
 

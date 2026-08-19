@@ -603,3 +603,64 @@ def test_next_meeting_missing_paragraph_is_reported(tmp_path):
     d = Document(); d.add_paragraph("七、月例會結束禱告"); d.save(str(tmp_path / "c.docx"))
     notes = _update_next_meeting(Document(str(tmp_path / "c.docx")), build_meta(2026, 8), {})
     assert notes and "找不到" in notes[0]
+
+
+# ── 製表日期＝產出當天，不是會議日期 ─────────────────────
+def test_asof_date_replaces_standalone_and_update_note(tmp_path):
+    """整段只有日期、以及「…更新」的註記，都要換成產出當天。"""
+    from datetime import date
+    from docx import Document
+    from engine.docx_utils import update_asof_date
+    p = str(tmp_path / "d.docx")
+    d = Document()
+    d.add_paragraph("2026年8月份各項奉獻統計表")
+    d.add_paragraph("2026年7月24日")                                  # 製表日
+    d.add_paragraph("(依據基甸總會網站資料2026年7月24日更新)")          # -2 的註記
+    d.save(p)
+
+    doc = Document(p)
+    log = update_asof_date(doc, date(2026, 8, 20))
+    doc.save(p)
+    texts = [x.text for x in Document(p).paragraphs]
+    assert texts[1] == "2026年8月20日"
+    assert texts[2] == "(依據基甸總會網站資料2026年8月20日更新)"
+    assert len(log) == 2
+
+
+def test_asof_date_leaves_meeting_time_and_ranges_alone(tmp_path):
+    """會議時間與職員名單期間都含年月日，但不是製表日，不能被改。"""
+    from datetime import date
+    from docx import Document
+    from engine.docx_utils import update_asof_date
+    p = str(tmp_path / "e.docx")
+    d = Document()
+    d.add_paragraph("時間:2026年8月23日(星期日)下午4時00分")
+    d.add_paragraph("2026年7月1日-2027年5月30日海山支會弟兄職員名單")
+    d.save(p)
+
+    doc = Document(p)
+    assert update_asof_date(doc, date(2026, 8, 20)) == []
+    doc.save(p)
+    texts = [x.text for x in Document(p).paragraphs]
+    assert texts[0] == "時間:2026年8月23日(星期日)下午4時00分"
+    assert texts[1] == "2026年7月1日-2027年5月30日海山支會弟兄職員名單"
+
+
+def test_asof_date_applies_even_without_data_updates(tmp_path):
+    """就算這份文件沒有任何資料要更新，製表日還是要跟著產出日走。"""
+    from datetime import date
+    from docx import Document
+    from engine.dates import build_meta
+    from engine.generate import generate_all
+    wd = tmp_path / "2026年8月月例會"
+    wd.mkdir()
+    doc = Document()
+    doc.add_paragraph("2026年8月份會員名冊")
+    doc.add_paragraph("2026年7月24日")
+    doc.save(str(wd / "月例會議程115年8月-10會員名冊(橫式).docx"))
+
+    res = generate_all(str(wd), build_meta(2026, 8), None, {}, date(2026, 8, 20))
+    assert res["as_of"] == "2026-08-20"
+    one = res["results"][0]
+    assert any("製表日期" in c for c in one["date_changes"])
+    assert Document(one["path"]).paragraphs[1].text == "2026年8月20日"

@@ -507,6 +507,7 @@ class GenReq(BaseModel):
     meeting_date: str | None = None
     next_meeting_text: str | None = None
     next_venue: str | None = None
+    as_of_date: str | None = None      # 製表日；不給就用伺服器當天（雲端是 UTC）
     only: list[int] | None = None      # 增量更新：只重繪指定文件編號
 
 
@@ -526,7 +527,9 @@ def api_generate(req: GenReq):
     _apply_next_meeting(meta, model, req)
     plan_note = _ensure_plan_in_model(meta, model)
     excel = wd / f"事工成果表_{req.year}_{req.month:02d}.xlsx"
-    res = gen.generate_all(str(wd), meta, str(excel) if excel.exists() else None, model)
+    as_of = date.fromisoformat(req.as_of_date) if req.as_of_date else None
+    res = gen.generate_all(str(wd), meta, str(excel) if excel.exists() else None,
+                           model, as_of)
     if not res["ok"]:
         raise HTTPException(400, res["error"])
     if req.only:

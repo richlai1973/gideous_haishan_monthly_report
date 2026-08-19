@@ -11,6 +11,8 @@ from .dates import chinese_month_name, roc_year
 
 # 財年期間字樣，如 2025-2026 / 2025~2026
 _RE_PERIOD = re.compile(r"20\d{2}\s*[-–~]\s*20\d{2}")
+# 完整年月日，如 2026年7月24日
+_RE_YMD = re.compile(r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日")
 
 
 def set_cell_text(cell, new_text) -> None:
@@ -133,6 +135,38 @@ def update_dates(doc, meta) -> list[str]:
     for old in seen:
         sep = "-" if "-" in old else ("~" if "~" in old else "–")
         rep(old, meta.period.replace("-", sep), "財年期間")
+    return log
+
+
+def update_asof_date(doc, as_of) -> list[str]:
+    """製表／更新日期一律改成「這份報告實際產出的那天」。
+
+    這種日期跟會議日期無關——範本裡 -3 是 7月23日、-4 是 7月24日、-6 是 7月25日，
+    就是當初各檔更新的那天。`update_dates()` 的通用規則只換得到月份，會留下舊的
+    「日」，於是報表上出現一個既不是會議日、也不是製表日的怪日期。
+
+    只動兩種明確的位置，其餘一律不碰：
+      ① 整段就是一個日期（-3 -4 -5 -6 -7 -8 -10 的標題下方）
+      ② 「…2026年7月24日更新」（-2 的資料來源註記）
+    像 `時間:2026年7月26日(星期日)` 或職員名單的 `2026年7月1日-2027年5月30日`
+    都不符合這兩種形狀，不會被改到。
+    """
+    want = f"{as_of.year}年{as_of.month}月{as_of.day}日"
+    log: list[str] = []
+    for para in iter_paragraphs(doc):
+        text = para.text.strip()
+        if not text or "年" not in text:
+            continue
+        if _RE_YMD.fullmatch(text):
+            if text != want:
+                set_paragraph_text(para, want)
+                log.append(f"製表日期: {text} → {want}")
+            continue
+        if "更新" in text:
+            m = re.search(_RE_YMD.pattern + r"(?=\s*更新)", text)
+            if m and m.group(0) != want:
+                _replace_in_paragraph(para, m.group(0), want)
+                log.append(f"資料更新日: {m.group(0)} → {want}")
     return log
 
 
