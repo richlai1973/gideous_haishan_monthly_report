@@ -11,7 +11,8 @@ from datetime import date
 from docx import Document
 
 from .dates import Meta, build_meta
-from .docx_utils import get_cell_text, replace_text_in_doc, set_cell_text, update_dates
+from .docx_utils import (get_cell_text, iter_paragraphs, replace_text_in_doc,
+                          set_cell_text, set_paragraph_text, update_dates)
 from .parse_excel import MinistryExcel
 
 DOC_SUFFIXES = [
@@ -19,6 +20,13 @@ DOC_SUFFIXES = [
     "-5贈經事工(除學校)", "-6學校贈經統計表", "-7會員及地界教會代禱項目",
     "-8早禱會及月例會輪值表", "-9年度教會見證統計表(橫式)", "-10會員名冊(橫式)",
 ]
+
+
+# 下次月例會：日期一律由 meta.next_meeting_date（下個月第四個禮拜天）推導，
+# 地點原則上固定，但年會月份會變（如 2026/08 是「年會場地」），所以介面可覆寫。
+DEFAULT_NEXT_VENUE = "土城清水教會"
+DEFAULT_NEXT_TIME = "下午4:00"
+_RE_NEXT_MEETING = re.compile(r"^(\s*[一二三四五六七八九十]+、\s*下次月例會預定)")
 
 
 def doc_filename(roc: int, month: int, suffix: str) -> str:
@@ -104,6 +112,7 @@ def generate_all(work_dir: str, meta: Meta, excel_path: str | None = None,
         try:
             if num == 1:
                 notes += _update_agenda(doc, meta, model)
+                notes += _update_next_meeting(doc, meta, model)
             elif num == 2:
                 if api_stats:
                     notes += _update_ministry_from_api(doc, api_stats, src)
@@ -140,6 +149,32 @@ def _find_row(table, keyword: str, col: int = 0):
         if keyword in get_cell_text(row.cells[col]):
             return row
     return None
+
+
+def _update_next_meeting(doc, meta: Meta, model: dict) -> list[str]:
+    """-1 議程「八、下次月例會預定 …」整行重寫。
+
+    這一行原本沒有任何更新邏輯，只能靠 update_dates() 碰運氣——而它寫的是
+    零補位的 `2026/07/26`，跟 update_dates() 找的 `2026/7/` 對不上，所以整行
+    會原封不動留著上個月的內容。7 月那份還留著年會的「地點:年會場地」，
+    直接複製就會變成下個月也在年會場地開會。
+    """
+    nm = model.get("next_meeting") or {}
+    d = date.fromisoformat(meta.next_meeting_date)
+    text = (nm.get("date_text") or "").strip() or \
+        f"{d.year}/{d.month:02d}/{d.day:02d}{DEFAULT_NEXT_TIME}"
+    venue = (nm.get("venue") or "").strip() or DEFAULT_NEXT_VENUE
+
+    for para in iter_paragraphs(doc):
+        m = _RE_NEXT_MEETING.match(para.text)
+        if not m:
+            continue
+        new = f"{m.group(1)} {text} 地點:{venue}"
+        if para.text.strip() == new.strip():
+            return []
+        set_paragraph_text(para, new)
+        return [f"下次月例會 → {text}　地點:{venue}"]
+    return ["⚠️ 找不到「下次月例會預定」段落，未更新"]
 
 
 def _update_agenda(doc, meta: Meta, model: dict) -> list[str]:

@@ -555,3 +555,51 @@ def test_fixed_template_rebuilds_meta_month(tmp_path, monkeypatch):
     assert (meta.prev_year, meta.prev_month) == (2026, 7)
     assert meta.prev_meeting_date == "2026-07-26"    # 第四個禮拜天，換日期用得到
     assert "固定範本" in label
+
+
+# ── -1 議程第八點：下次月例會 ────────────────────────────
+def _agenda_doc(path, line="八、下次月例會預定 2026/08/20~22     地點:年會場地"):
+    from docx import Document
+    d = Document()
+    d.add_paragraph("七、月例會結束禱告")
+    d.add_paragraph(line)
+    d.save(str(path))
+    return str(path)
+
+
+def test_next_meeting_line_uses_meta_date_and_default_venue(tmp_path):
+    """年會那行不會被 update_dates 碰到（2026/08 是零補位），必須整行重寫。"""
+    from docx import Document
+    from engine.dates import build_meta
+    from engine.generate import _update_next_meeting
+    p = _agenda_doc(tmp_path / "a.docx")
+    doc = Document(p)
+    meta = build_meta(2026, 8)                     # 下次月例會＝2026-09-27
+    notes = _update_next_meeting(doc, meta, {})
+    doc.save(p)
+    text = Document(p).paragraphs[1].text
+    assert text == "八、下次月例會預定 2026/09/27下午4:00 地點:土城清水教會"
+    assert "2026/09/27" in notes[0]
+    assert "年會場地" not in text
+
+
+def test_next_meeting_can_be_overridden(tmp_path):
+    """年會月份要能改成 8/20~22、地點年會場地。"""
+    from docx import Document
+    from engine.dates import build_meta
+    from engine.generate import _update_next_meeting
+    p = _agenda_doc(tmp_path / "b.docx", "八、下次月例會預定 2026/07/26下午4:00 地點:土城清水教會")
+    doc = Document(p)
+    model = {"next_meeting": {"date_text": "2026/08/20~22", "venue": "年會場地"}}
+    _update_next_meeting(doc, build_meta(2026, 7), model)
+    doc.save(p)
+    assert Document(p).paragraphs[1].text == "八、下次月例會預定 2026/08/20~22 地點:年會場地"
+
+
+def test_next_meeting_missing_paragraph_is_reported(tmp_path):
+    from docx import Document
+    from engine.dates import build_meta
+    from engine.generate import _update_next_meeting
+    d = Document(); d.add_paragraph("七、月例會結束禱告"); d.save(str(tmp_path / "c.docx"))
+    notes = _update_next_meeting(Document(str(tmp_path / "c.docx")), build_meta(2026, 8), {})
+    assert notes and "找不到" in notes[0]

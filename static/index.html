@@ -94,6 +94,10 @@
         </select></div>
       <div><label>會議日期（第四個禮拜天）</label>
         <input id="meeting" type="date" style="width:160px"></div>
+      <div><label>下次月例會（-1 第八點）</label>
+        <input id="next-meeting" style="width:180px" placeholder="2026/09/27下午4:00"></div>
+      <div><label>下次地點</label>
+        <input id="next-venue" style="width:150px" placeholder="土城清水教會"></div>
       <button id="btn-init">① 初始化 / 複製範本</button>
       <button id="btn-gen" class="ghost">產生 10 份報告</button>
       <span id="ready" class="badge">—</span>
@@ -251,6 +255,11 @@ async function refresh() {
   $('#hdr-sub').textContent =
     `民國 ${m.roc_year} 年 ${m.report_month} 月 · 財年 ${m.period} · 範本 ${m.prev_year}年${m.prev_month}月`;
   if (!$('#meeting').value) $('#meeting').value = m.meeting_date;
+  // -1 議程第八點：日期預設用「下次月例會」，地點原則上固定，兩者都可改
+  const nm = (s.model && s.model.next_meeting) || {};
+  if (!$('#next-meeting').value)
+    $('#next-meeting').value = nm.date_text || m.next_meeting_date.replace(/-/g, '/') + '下午4:00';
+  if (!$('#next-venue').value) $('#next-venue').value = nm.venue || '土城清水教會';
   $('#dash-link').href = s.dashboard_url;
 
   $('#meta').innerHTML = `
@@ -296,7 +305,9 @@ async function refresh() {
 $('#btn-init').onclick = async () => {
   const r = await api('/api/init', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ year: Y(), month: M(), meeting_date: $('#meeting').value })
+    body: JSON.stringify({ year: Y(), month: M(), meeting_date: $('#meeting').value,
+                           next_meeting_text: $('#next-meeting').value,
+                           next_venue: $('#next-venue').value })
   }).catch(e => ({ error: e.message }));
   $('#p1-out').innerHTML = r.error
     ? `<p class="badge err">${r.error}</p>`
@@ -310,7 +321,9 @@ $('#btn-gen').onclick = async (e) => {
   try {
     const r = await api('/api/generate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ year: Y(), month: M(), meeting_date: $('#meeting').value })
+      body: JSON.stringify({ year: Y(), month: M(), meeting_date: $('#meeting').value,
+                             next_meeting_text: $('#next-meeting').value,
+                             next_venue: $('#next-venue').value })
     });
     $('#p1-out').innerHTML =
       `<p class="badge">範本來源：${esc(r.template_source || '—')}</p>` +
@@ -585,7 +598,9 @@ $('#btn-zip').onclick = () => location.href = `/api/download?year=${Y()}&month=$
   const now = new Date();
   $('#year').value = now.getFullYear();
   $('#month').value = now.getMonth() + 1;
-  $('#year').onchange = $('#month').onchange = () => { $('#meeting').value = ''; refresh(); };
+  $('#year').onchange = $('#month').onchange = () => {
+    $('#meeting').value = ''; $('#next-meeting').value = ''; refresh();
+  };
   // 登入狀態與密碼強度提醒
   try {
     const a = await api('/api/auth-status');

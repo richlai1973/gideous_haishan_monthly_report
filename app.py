@@ -265,6 +265,23 @@ def status(year: int | None = None, month: int | None = None):
     }
 
 
+def _apply_next_meeting(meta, model, req) -> None:
+    """把介面上的「下次月例會／地點」寫進資料模型（-1 議程第八點會用到）。
+
+    沒填就不覆寫——空字串代表「用預設」，不是「清空」。
+    """
+    patch = {k: v.strip() for k, v in
+             (("date_text", req.next_meeting_text or ""),
+              ("venue", req.next_venue or "")) if v and v.strip()}
+    if not patch:
+        return
+    cur = dict(model.get("next_meeting") or {})
+    if cur == {**cur, **patch}:
+        return
+    merge(model, {"next_meeting": patch}, "介面:下次月例會")
+    store.save_model(meta, model)
+
+
 def _ensure_plan_in_model(meta, model) -> str | None:
     """年度贈經計畫是**整個財年的固定參考**，新月份要自動帶進資料模型。
 
@@ -299,6 +316,8 @@ class InitReq(BaseModel):
     year: int
     month: int
     meeting_date: str | None = None
+    next_meeting_text: str | None = None   # 「2026/09/27下午4:00」，可含年會等特例
+    next_venue: str | None = None          # 預設 土城清水教會
 
 
 @app.post("/api/init")
@@ -314,6 +333,7 @@ def api_init(req: InitReq):
     model = store.load_model(meta)
     model["meta"] = meta.to_dict()
     store.save_model(meta, model)
+    _apply_next_meeting(meta, model, req)
     note = _ensure_plan_in_model(meta, model)
     res["meta"] = meta.to_dict()
     res["template_source"] = tpl_label
@@ -485,6 +505,8 @@ class GenReq(BaseModel):
     year: int
     month: int
     meeting_date: str | None = None
+    next_meeting_text: str | None = None
+    next_venue: str | None = None
     only: list[int] | None = None      # 增量更新：只重繪指定文件編號
 
 
@@ -501,6 +523,7 @@ def api_generate(req: GenReq):
             raise HTTPException(400, init["error"])
 
     model = store.load_model(meta)
+    _apply_next_meeting(meta, model, req)
     plan_note = _ensure_plan_in_model(meta, model)
     excel = wd / f"事工成果表_{req.year}_{req.month:02d}.xlsx"
     res = gen.generate_all(str(wd), meta, str(excel) if excel.exists() else None, model)

@@ -55,6 +55,19 @@ def _replace_in_paragraph(para, old: str, new: str) -> int:
     return hits
 
 
+def set_paragraph_text(para, text: str) -> None:
+    """整段改寫：文字寫進第一個 run，其餘清空（保留段落格式）。
+
+    跟 set_cell_text 同樣的道理——只改第一個 run 而不清掉其他 run 會留殘影。
+    """
+    if para.runs:
+        para.runs[0].text = text
+        for run in para.runs[1:]:
+            run.text = ""
+    else:
+        para.text = text
+
+
 def iter_paragraphs(doc):
     """走訪文件內所有段落（含表格 cell、巢狀表格）。"""
     for para in doc.paragraphs:
