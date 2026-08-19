@@ -154,8 +154,15 @@ class DriveClient:
         if os.path.exists(self.token_path):
             creds = Credentials.from_authorized_user_file(self.token_path, SCOPES)
         if creds and creds.expired and creds.refresh_token:
-            self._do_refresh(creds, Request)
-            self._save(creds)
+            try:
+                self._do_refresh(creds, Request)
+                self._save(creds)
+            except DriveNotConfigured:
+                # 本機重新授權的入口：舊 token 失效時直接改走瀏覽器流程，
+                # 不要逼使用者先手動刪掉 credentials/token.json。
+                if not interactive or _is_cloud():
+                    raise
+                creds = None
         if not creds or not creds.valid:
             if _is_cloud():
                 # serverless 開不了瀏覽器；走到這裡代表環境變數沒設或設錯

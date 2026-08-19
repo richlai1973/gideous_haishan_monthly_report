@@ -573,3 +573,39 @@ def test_undated_sessions_never_autofill():
     assert schools_of_month(plan, 2027, 6) == []
     assert len(schools_of_month(plan, 2026, 6, include_undated=True)) == 1
     assert [s["school"] for s in schools_of_month(plan, 2027, 4)] == ["鳳鳴國中"]
+
+
+def test_expired_local_token_falls_back_to_browser_flow(tmp_path, monkeypatch):
+    """本機 token 過期時，按「連結 Google Drive」要能直接重新授權。
+
+    否則使用者得先自己刪 credentials/token.json 才救得回來。
+    """
+    from engine import drive as D
+    c = D.DriveClient(str(tmp_path))
+    (tmp_path / "token.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(D, "_is_cloud", lambda: False)
+
+    class _Expired:
+        expired, valid, refresh_token = True, False, "x"
+
+    class _Flow:
+        @staticmethod
+        def from_client_secrets_file(path, scopes):
+            class F:
+                @staticmethod
+                def run_local_server(**kw):
+                    class C:
+                        valid = True
+                        def to_json(self): return "{}"
+                    return C()
+            return F()
+
+    monkeypatch.setattr(D, "_import_libs", lambda: (
+        object, type("Cr", (), {"from_authorized_user_file":
+                                staticmethod(lambda *a: _Expired())}),
+        _Flow, lambda *a, **k: "service", object))
+    monkeypatch.setattr(c, "_do_refresh", lambda *a: (_ for _ in ()).throw(
+        D.DriveAuthExpired("過期")))
+    (tmp_path / "client_secret.json").write_text("{}", encoding="utf-8")
+
+    assert c.authorize(interactive=True) == "service"   # 沒有丟例外
