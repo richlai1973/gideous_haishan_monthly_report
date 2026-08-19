@@ -539,7 +539,9 @@ async def api_plan_upload(year: int = Form(...), month: int = Form(...),
     store.save_model(meta, model)
 
     from engine.parse_plan import schools_of_month
-    this_month = schools_of_month(plan, meta.report_year, meta.report_month)
+    # 預覽要看得到「日期待定」的場次，但產出時不會自動填進 -6
+    this_month = schools_of_month(plan, meta.report_year, meta.report_month,
+                                  include_undated=True)
 
     return {"ok": True, "period": period, "file": os.path.basename(str(dest)),
             "path": str(dest), "storage": STORAGE_MODE,

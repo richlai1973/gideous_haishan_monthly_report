@@ -506,9 +506,15 @@ def _update_schools(doc, meta: Meta, model: dict) -> list[str]:
     if not plan.get("schools"):
         return []
 
-    this_month = schools_of_month(plan, meta.report_year, meta.report_month)
-    if not this_month:
+    all_month = schools_of_month(plan, meta.report_year, meta.report_month,
+                                 include_undated=True)
+    this_month = [s for s in all_month if s["date"]]
+    pending = [s for s in all_month if not s["date"]]
+    if not all_month:
         return [f"年度計畫中 {meta.report_month} 月無學校場次"]
+    if not this_month:
+        return ["日期未定，未自動填入（請定案後手動補）："
+                + "、".join(s["school"] for s in pending)]
 
     table = doc.tables[0]
     # 表頭：日期 / 學校、醫院、旅館 / 數量 / 参與同工 / 弟兄 / 姊妹
@@ -533,6 +539,9 @@ def _update_schools(doc, meta: Meta, model: dict) -> list[str]:
         filled += 1
 
     notes = []
+    if pending:
+        notes.append("日期未定，未自動填入（請定案後手動補）："
+                     + "、".join(s["school"] for s in pending))
     if filled:
         notes.append(f"已填入本月 {filled} 場學校贈經："
                      + "、".join(s["school"] for s in this_month)[:60])

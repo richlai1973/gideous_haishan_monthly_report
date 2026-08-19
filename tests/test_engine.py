@@ -394,8 +394,10 @@ def test_schools_of_month(tmp_path):
     assert [s["school"] for s in schools_of_month(plan, 2026, 9)] == \
         ["北大國高中", "安溪國中"]
     assert schools_of_month(plan, 2026, 7) == []
-    # 只有月份的畢典也要被 6 月撈到
-    assert [s["school"] for s in schools_of_month(plan, 2027, 6)] == ["清水國高中畢典"]
+    # 只有月份的畢典：日期定案前不自動填進任何 6 月，預覽才列得出來
+    assert schools_of_month(plan, 2027, 6) == []
+    assert [s["school"] for s in schools_of_month(plan, 2027, 6, include_undated=True)] \
+        == ["清水國高中畢典"]
 
 
 def test_api_stats_shape():
@@ -558,3 +560,16 @@ def test_pinned_plan_auto_loads_into_each_month(tmp_path, monkeypatch):
     assert model["distribution_plan"]["schools"][0]["school"] == "北大國高中"
     # 已帶入後不重複寫入
     assert A._ensure_plan_in_model(meta, A.store.load_model(meta)) is None
+
+
+def test_undated_sessions_never_autofill():
+    """「06月　日」畢典日期未定：預設不進任何月份，預覽才列出來。"""
+    from engine.parse_plan import schools_of_month
+    plan = {"schools": [
+        {"school": "鳳鳴國中", "date": "2027-04-14", "month": 4, "date_raw": "4月14日"},
+        {"school": "清水國高中畢典", "date": None, "month": 6, "date_raw": "06月    日"},
+    ]}
+    assert schools_of_month(plan, 2026, 6) == []          # 不自動填
+    assert schools_of_month(plan, 2027, 6) == []
+    assert len(schools_of_month(plan, 2026, 6, include_undated=True)) == 1
+    assert [s["school"] for s in schools_of_month(plan, 2027, 4)] == ["鳳鳴國中"]

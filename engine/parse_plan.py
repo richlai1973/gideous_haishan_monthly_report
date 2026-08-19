@@ -161,12 +161,20 @@ def parse(path: str | Path, period: str) -> dict:
             "schools": schools, "warnings": warnings}
 
 
-def schools_of_month(plan: dict, year: int, month: int) -> list[dict]:
-    """篩出某個月份的場次（含只有月份、日期未定者）。"""
-    out = []
+def schools_of_month(plan: dict, year: int, month: int,
+                     include_undated: bool = False) -> list[dict]:
+    """篩出某個月份的場次。
+
+    預設**只回日期已定**的場次。日期未定者（「06月　日」的三場畢典、
+    無日期的候補學校）自動填進 -6 會寫出一個假日期，而且分不出是哪一年的
+    6 月——2026/06 與 2027/06 都會被算到。定案前一律不自動填。
+    介面預覽用 `include_undated=True` 把它們列出來提醒承辦人。
+    """
+    dated, undated = [], []
     for s in plan.get("schools", []):
-        if s["date"] and s["date"][:7] == f"{year}-{month:02d}":
-            out.append(s)
-        elif not s["date"] and s["month"] == month:
-            out.append(s)
-    return out
+        if s["date"]:
+            if s["date"][:7] == f"{year}-{month:02d}":
+                dated.append(s)
+        elif s["month"] == month:
+            undated.append(s)
+    return dated + undated if include_undated else dated
