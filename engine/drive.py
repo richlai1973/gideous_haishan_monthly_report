@@ -29,6 +29,36 @@ class DriveNotConfigured(RuntimeError):
     pass
 
 
+class DriveAuthExpired(DriveNotConfigured):
+    """refresh token 失效（過期／被撤銷／換過 OAuth 用戶端）。
+
+    最常見原因：OAuth 同意畫面還停在「測試中」，Google 只發 7 天有效的
+    refresh token。到期後每個要動 Drive 的請求都會 invalid_grant，
+    以前會一路冒泡成前端的「Internal Server Error」——所以在這裡就轉成
+    看得懂、講得出下一步的訊息。
+    """
+
+
+REAUTH_HINT = (
+    "Google Drive 授權已失效（invalid_grant：refresh token 過期或被撤銷）。"
+    "重新授權三步驟：① Google Cloud Console → OAuth 同意畫面「發布為正式版」"
+    "（停在「測試中」的 token 只有 7 天）；② 本機執行 App，按「連結 Google Drive」"
+    "重新取得 token；③ 依 DEPLOY.md 第三章把新的 GOOGLE_REFRESH_TOKEN 更新到 "
+    "Vercel 環境變數並重新部署。"
+)
+
+CLOUD_AUTH_HINT = (
+    "雲端環境開不了瀏覽器，無法在這裡完成 Google 授權。請在本機授權後，把 "
+    "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN "
+    "設到 Vercel 環境變數並重新部署（見 DEPLOY.md 第三章）。"
+)
+
+
+def _is_cloud() -> bool:
+    from engine.auth import is_cloud
+    return is_cloud()
+
+
 def _import_libs():
     try:
         from google.auth.transport.requests import Request
@@ -50,15 +80,46 @@ class DriveClient:
         self.client_secret = os.path.join(cred_dir, "client_secret.json")
         self.token_path = os.path.join(cred_dir, "token.json")
         self._service = None
+        self._last_error: str | None = None
 
     # ── 狀態 ─────────────────────────────────────────────
+    def env_configured(self) -> bool:
+        """雲端授權模式：三個環境變數都在就算已設定。"""
+        return all(os.environ.get(k, "").strip() for k in
+                   ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"))
+
     def status(self) -> dict:
+        """雲端沒有 client_secret.json 也沒有 token.json，授權走環境變數。
+
+        舊版只看檔案，雲端永遠顯示「缺 client_secret.json」——看起來像沒設定，
+        實際上是設定好但 token 過期。兩者要分得出來。
+        """
+        env = self.env_configured()
+        token_file = os.path.exists(self.token_path)
         return {
+            "mode": "env" if env else ("file" if token_file else "none"),
+            "env_configured": env,
             "client_secret_present": os.path.exists(self.client_secret),
-            "authorized": os.path.exists(self.token_path),
+            "token_file_present": token_file,
+            "authorized": bool(env or token_file),
+            "error": self._last_error,
+            "reauth_hint": REAUTH_HINT if self._last_error else None,
             "parent_id": self.parent_id,
             "parent_url": f"https://drive.google.com/drive/folders/{self.parent_id}",
         }
+
+    # ── 換 access token（唯一會碰到 invalid_grant 的地方）──
+    def _do_refresh(self, creds, Request) -> None:
+        from google.auth.exceptions import RefreshError
+        try:
+            creds.refresh(Request())
+        except RefreshError as exc:
+            self._last_error = str(exc)
+            raise DriveAuthExpired(REAUTH_HINT) from exc
+        except Exception as exc:          # 網路、憑證格式等其他問題
+            self._last_error = str(exc)
+            raise DriveNotConfigured(f"連線 Google Drive 失敗：{exc}") from exc
+        self._last_error = None
 
     # ── 授權 ─────────────────────────────────────────────
     def _creds_from_env(self):
@@ -84,7 +145,7 @@ class DriveClient:
         # 優先走環境變數（雲端）
         creds = self._creds_from_env()
         if creds is not None:
-            creds.refresh(Request())
+            self._do_refresh(creds, Request)
             self._service = build("drive", "v3", credentials=creds,
                                   cache_discovery=False)
             return self._service
@@ -93,9 +154,12 @@ class DriveClient:
         if os.path.exists(self.token_path):
             creds = Credentials.from_authorized_user_file(self.token_path, SCOPES)
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            self._do_refresh(creds, Request)
             self._save(creds)
         if not creds or not creds.valid:
+            if _is_cloud():
+                # serverless 開不了瀏覽器；走到這裡代表環境變數沒設或設錯
+                raise DriveNotConfigured(CLOUD_AUTH_HINT)
             if not interactive:
                 raise DriveNotConfigured("尚未授權 Google Drive，請先於介面點「連結 Google Drive」")
             if not os.path.exists(self.client_secret):

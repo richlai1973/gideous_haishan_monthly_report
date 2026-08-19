@@ -100,6 +100,27 @@ Grafana 讀的 `gideons_goal1` 缺新財年資料（回 null），但總會
 另外：**`.gitignore` 不要用 `*.json`**。曾因此把 `vercel.json` 擋在
 repo 外，部署看似成功實則整站 404，查了三輪才發現。要擋憑證就指名擋。
 
+### Drive 授權過期 = 整站看起來壞掉（2026-08 事故）
+
+OAuth 同意畫面停在「測試中」時，Google 只發**7 天**有效的 refresh token。
+到期後每個要寫 Drive 的請求都 `invalid_grant`，一路冒泡成
+`Exception in ASGI application` → 前端只看得到「Internal Server Error」。
+
+處理原則，改動這一塊時別退回去：
+
+1. `drive._do_refresh()` 是唯一會碰到 invalid_grant 的地方，一律轉成
+   `DriveAuthExpired`（訊息含重新授權三步驟），不要讓 RefreshError 冒泡。
+2. `app.py` 註冊了 `DriveNotConfigured → 400` 與 `Exception → JSON 500`
+   兩個處理器。**任何新端點都不該再回裸的 "Internal Server Error"。**
+3. Drive 寫入失敗**不中斷流程**：`save_model` / `save_plan` / `publish`
+   先寫 /tmp，失敗只記進 `store.warnings`，由 `/api/*` 回傳、介面顯示黃字。
+   使用者仍能產出並「下載 ZIP」——但一定要看得到「沒同步」這件事。
+4. 雲端的授權狀態看**環境變數**不是檔案。舊版 `status()` 只看
+   `client_secret.json`，雲端永遠顯示「缺憑證」，其實是 token 過期。
+
+根治只有一條：Google Cloud Console 把同意畫面**發布為正式版**，
+再重新取 token。否則每 7 天壞一次。
+
 ## 安全邊界
 
 - 密碼、token、憑證**只走環境變數或 credentials/**，絕不進程式碼與版控。
@@ -138,6 +159,12 @@ repo 外，部署看似成功實則整站 404，查了三輪才發現。要擋�
 上傳類功能要走完整條鏈才算完成：
 **存檔 → 解析 → 寫入 model → generate 有對應的 updater → 產出可見**。
 少任何一環，UI 都會顯示成功卻什麼都沒發生。
+
+同一條鏈還有第三次：`model.json` 是**逐月**的，而年度贈經計畫是**跨月固定**的。
+只在上傳當月寫進 model，隔月 -6 又空了，介面卻寫「一年上傳一次即可」。
+現在 `/api/init` 與 `/api/generate` 會呼叫 `_ensure_plan_in_model()`，
+發現本月 model 沒有該財年的計畫就自動從儲存層帶入。
+新增其他「整個財年固定」的資料（年度目標、輪值表）時比照辦理。
 
 ### 年度贈經計畫的 Excel 版面
 

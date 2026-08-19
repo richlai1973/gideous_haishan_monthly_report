@@ -44,6 +44,10 @@ class Storage:
         """把工作區產出送到最終位置。本機版不需要動作。"""
         return {"published": False}
 
+    def take_warnings(self) -> list[str]:
+        """取出並清空累積的警告（本機版永遠沒有）。"""
+        return []
+
     def find_plan(self, period: str) -> Path | None:
         """年度贈經計畫（整個財年固定的學校配送排程）。找不到回傳 None。"""
         raise NotImplementedError
@@ -118,13 +122,26 @@ class DriveStorage(Storage):
         self.drive = drive_client
         self.tmp_root = Path(tmp_root or tempfile.gettempdir()) / "gideons"
         self._synced: set[str] = set()
+        self.warnings: list[str] = []
 
-    @staticmethod
-    def _safe(fn, default=None):
+    # ── 警告蒐集 ─────────────────────────────────────────
+    # Drive 掛掉時不再讓請求 500：資料照樣寫進 /tmp，只是這次工作階段結束後
+    # 不保留。使用者仍能產出並「下載 ZIP」，但**必須看得到**沒同步這件事，
+    # 否則就變成 CLAUDE.md 講的「顯示成功卻什麼都沒發生」。
+    def _warn(self, msg: str) -> None:
+        if msg not in self.warnings:
+            self.warnings.append(msg)
+
+    def take_warnings(self) -> list[str]:
+        w, self.warnings = self.warnings, []
+        return w
+
+    def _safe(self, fn, default=None):
         """Drive 未設定或暫時失敗時回傳預設值，讓狀態頁仍能顯示而非 500。"""
         try:
             return fn()
-        except Exception:
+        except Exception as exc:
+            self._warn(f"Google Drive 讀取失敗：{exc}")
             return default
 
     # ── /tmp 工作區 ──────────────────────────────────────
@@ -205,8 +222,11 @@ class DriveStorage(Storage):
         local.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(model, ensure_ascii=False, indent=2, default=str)
         local.write_text(payload, encoding="utf-8")
-        folder = self.drive.ensure_folder(meta.drive_folder_name)
-        self.drive.upload_file(str(local), folder["id"], "application/json")
+        try:
+            folder = self.drive.ensure_folder(meta.drive_folder_name)
+            self.drive.upload_file(str(local), folder["id"], "application/json")
+        except Exception as exc:
+            self._warn(f"資料模型只留在本次工作階段，未同步到 Drive：{exc}")
 
     # ── 年度贈經計畫 ─────────────────────────────────────
     def find_plan(self, period: str) -> Path | None:
@@ -234,12 +254,15 @@ class DriveStorage(Storage):
         return cached
 
     def save_plan(self, period: str, src: Path) -> Path:
-        folder = self.drive.ensure_folder(PLAN_FOLDER)
         staged = self.tmp_root / PLAN_FOLDER / plan_filename(period)
         staged.parent.mkdir(parents=True, exist_ok=True)
         if Path(src) != staged:
             shutil.copy2(src, staged)
-        self.drive.upload_file(str(staged), folder["id"])
+        try:
+            folder = self.drive.ensure_folder(PLAN_FOLDER)
+            self.drive.upload_file(str(staged), folder["id"])
+        except Exception as exc:
+            self._warn(f"贈經計畫只留在本次工作階段，未同步到 Drive：{exc}")
         return staged
 
     # ── 上傳產出 ─────────────────────────────────────────
@@ -249,7 +272,11 @@ class DriveStorage(Storage):
         paths += [str(p) for p in wd.glob("*.xlsx")]
         if not paths:
             return {"published": False, "error": "工作區無產出檔"}
-        res = self.drive.upload_month(paths, meta.drive_folder_name)
+        try:
+            res = self.drive.upload_month(paths, meta.drive_folder_name)
+        except Exception as exc:
+            self._warn(f"產出未上傳 Drive：{exc}")
+            return {"published": False, "error": str(exc)}
         return {"published": True, **res}
 
 

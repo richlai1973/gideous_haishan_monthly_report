@@ -461,3 +461,100 @@ def test_split_and_filter_month():
     assert r["messages"][0]["who"] == "葉忠濶"
     assert r["messages"][1]["text"] == "忠濶兄早上好"
     assert r["range"] == ("2026-06-01", "2026-07-02")
+
+
+# ── Drive 授權失效不得變成 500 ────────────────────────────
+# 真實事故：refresh token 過期（OAuth 同意畫面停在「測試中」只給 7 天），
+# 每個要動 Drive 的請求都 invalid_grant，前端只看得到「Internal Server Error」。
+class _FakeCreds:
+    def refresh(self, request):
+        from google.auth.exceptions import RefreshError
+        raise RefreshError("invalid_grant: Bad Request",
+                           {"error": "invalid_grant"})
+
+
+def test_drive_refresh_error_becomes_readable_message(tmp_path):
+    from engine.drive import DriveAuthExpired, DriveClient
+    c = DriveClient(str(tmp_path))
+    try:
+        c._do_refresh(_FakeCreds(), lambda: None)
+    except DriveAuthExpired as exc:
+        assert "invalid_grant" in str(exc) and "重新授權" in str(exc)
+    else:
+        raise AssertionError("授權過期必須轉成 DriveAuthExpired")
+    assert c.status()["error"]                  # 狀態列要看得到原因
+
+
+def test_drive_status_env_mode(tmp_path, monkeypatch):
+    """雲端沒有 client_secret.json，授權走環境變數——不能再顯示「缺憑證」。"""
+    from engine.drive import DriveClient
+    for k in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"):
+        monkeypatch.setenv(k, "x")
+    st = DriveClient(str(tmp_path)).status()
+    assert st["mode"] == "env" and st["authorized"] is True
+
+
+class _DeadDrive:
+    """任何 Drive 呼叫都失敗，模擬授權過期。"""
+    def ensure_folder(self, *a, **k):
+        from engine.drive import DriveAuthExpired
+        raise DriveAuthExpired("授權已失效")
+
+    def upload_file(self, *a, **k):
+        raise AssertionError("不該走到上傳")
+
+    def find_folder(self, *a, **k):
+        from engine.drive import DriveAuthExpired
+        raise DriveAuthExpired("授權已失效")
+
+
+def test_save_model_degrades_with_warning(tmp_path):
+    """Drive 掛掉時：資料照樣寫進工作區，但必須留下警告，不能靜默成功。"""
+    from engine.dates import build_meta
+    from engine.storage import DriveStorage
+    st = DriveStorage(_DeadDrive(), tmp_root=str(tmp_path))
+    meta = build_meta(2026, 7)
+    st.save_model(meta, {"a": 1})
+    assert (st.work_dir(meta) / "_inputs" / "model.json").exists()
+    w = st.take_warnings()
+    assert any("Drive" in x for x in w)
+    assert st.take_warnings() == []             # 取出後清空，不會重複顯示
+
+
+# ── 年度贈經計畫是「固定參考」，不是「上傳當月才有」────────
+def _mini_plan_xlsx(path, period="2026-2027"):
+    """最小可解析版面：第 1 列年度標題、第 2 列欄位標頭、第 3 列起資料。"""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "配送計畫"
+    ws.cell(1, 1, f"{period}年度學校(2026/6/1-2027/5/31)贈經計畫規劃")
+    for c, h in enumerate(["月份", "No", "贈經日期", "項目", "學校",
+                           "星期", "時間", "贈經數"], start=1):
+        ws.cell(2, c, h)
+    ws.cell(3, 1, "9月"); ws.cell(3, 2, 1); ws.cell(3, 3, "9月2日")
+    ws.cell(3, 4, "國高中"); ws.cell(3, 5, "北大國高中"); ws.cell(3, 7, "15:30")
+    wb.save(str(path))
+
+
+def test_pinned_plan_auto_loads_into_each_month(tmp_path, monkeypatch):
+    """隔月產生報告時，-6 仍要吃得到同一份年度計畫（不必重新上傳）。"""
+    import importlib
+    plan_dir = tmp_path / "贈經計畫"
+    plan_dir.mkdir()
+    _mini_plan_xlsx(plan_dir / "2026-2027_聖經配送計畫.xlsx")
+    monkeypatch.setenv("GIDEONS_BASE_DIR", str(tmp_path / "海山支會"))
+    monkeypatch.setenv("GIDEONS_PLAN_DIR", str(plan_dir))
+    monkeypatch.setenv("STORAGE", "local")
+    monkeypatch.delenv("VERCEL", raising=False)
+    import app as A
+    A = importlib.reload(A)
+
+    meta = A._meta(2026, 9)                 # 上傳後的「隔月」
+    model = A.store.load_model(meta)
+    assert not model.get("distribution_plan")
+    note = A._ensure_plan_in_model(meta, model)
+    assert "自動帶入" in note
+    assert model["distribution_plan"]["schools"][0]["school"] == "北大國高中"
+    # 已帶入後不重複寫入
+    assert A._ensure_plan_in_model(meta, A.store.load_model(meta)) is None

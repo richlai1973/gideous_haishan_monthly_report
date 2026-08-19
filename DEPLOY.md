@@ -46,8 +46,10 @@ cp .env.example .env
 4. 啟動 App → 按「連結 Google Drive」→ 瀏覽器完成授權
    token 存到 `credentials/token.json`，之後自動續用
 
-> 若同意畫面還在「測試中」，要把自己加進測試使用者，且 refresh token
-> **7 天就過期**。長期使用請把應用程式狀態發布為正式版。
+> ⚠️ 若同意畫面還在「測試中」，要把自己加進測試使用者，且 refresh token
+> **7 天就過期**。這不是小事：token 一過期，雲端版每個要寫 Drive 的動作
+> 都會失敗（2026-08 就是這樣整站看起來壞掉）。
+> **長期使用請務必把應用程式狀態發布為正式版**，再重新取一次 token。
 
 ### 疑難排解
 
@@ -58,6 +60,7 @@ cp .env.example .env
 | Drive 顯示「待授權」 | 按「連結 Google Drive」；測試模式 token 7 天過期 |
 | 找不到範本資料夾 | 確認 `~/Documents/海山支會/{年}年{月}月例會` 存在 |
 | 擷取資料失敗 | 確認網路可連 `gideons-dashboard.pointing.tw` |
+| `invalid_grant` / 「授權已失效」 | refresh token 過期。同意畫面**發布為正式版**後重新授權，再更新 Vercel 的 `GOOGLE_REFRESH_TOKEN` |
 
 ---
 
@@ -172,6 +175,19 @@ Project → Settings → Environment Variables，全部套用到 Production：
 > Serverless Functions inside the `api` directory.
 
 → `functions` 的鍵指到了 `api/` 以外的檔案，改成 `api/index.py`。
+
+#### 「Internal Server Error」／狀態列顯示「⛔ 授權已失效」
+
+Drive 的 refresh token 過期或被撤銷（`invalid_grant`）。現在介面會直接寫出原因
+與三步驟，照做即可：
+
+1. Google Cloud Console → OAuth 同意畫面 → **發布為正式版**（測試中只有 7 天）
+2. 本機跑 `python3 run.py` → 按「連結 Google Drive」重新授權
+3. 用本章「1. 取出 refresh token」的指令取新值 → 更新 Vercel 環境變數
+   `GOOGLE_REFRESH_TOKEN` → **Redeploy**
+
+授權壞掉時系統不會整個停擺：資料仍寫入雲端暫存區，可正常產出並「下載 ZIP」，
+只是離開網頁後不保留，介面會以黃字提醒。
 
 #### 部署成功但 500 或頁面空白
 

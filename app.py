@@ -24,7 +24,8 @@ from engine import auth
 from engine import generate as gen
 from engine import grafana
 from engine.dates import build_meta, dashboard_url, default_report_month, latest_fiscal_year
-from engine.drive import DEFAULT_PARENT_ID, DriveClient, DriveNotConfigured
+from engine.drive import (CLOUD_AUTH_HINT, DEFAULT_PARENT_ID, DriveAuthExpired,
+                          DriveClient, DriveNotConfigured)
 from engine.parse_files import SUPPORTED, parse_file
 from engine.storage import make_storage
 from models.model import AFFECTED_DOCS, merge
@@ -59,6 +60,40 @@ drive = DriveClient(str(CRED_DIR), os.environ.get("GIDEONS_DRIVE_PARENT", DEFAUL
 # 儲存層：local（本機資料夾）或 drive（雲端，無持久磁碟）
 STORAGE_MODE = os.environ.get("STORAGE", "drive" if auth.is_cloud() else "local")
 store = make_storage(STORAGE_MODE, BASE_DIR, drive, PLAN_DIR)
+
+# ── 錯誤處理 ─────────────────────────────────────────────
+# Drive 授權過期屬於「設定問題」，不是伺服器壞掉。以前它會一路冒泡成
+# 500，前端只拿得到「Internal Server Error」七個字，看不出要做什麼。
+
+
+def _warnings() -> list[str]:
+    """取出儲存層這次請求累積的警告（例如 Drive 沒同步）。"""
+    return store.take_warnings()
+
+
+def _detail(msg: str) -> str:
+    w = _warnings()
+    return msg + ("　（" + "；".join(w) + "）" if w else "")
+
+
+@app.exception_handler(DriveNotConfigured)
+async def _handle_drive(request: Request, exc: DriveNotConfigured):
+    return JSONResponse(
+        {"detail": str(exc),
+         "kind": "drive_expired" if isinstance(exc, DriveAuthExpired) else "drive"},
+        status_code=400)
+
+
+@app.exception_handler(Exception)
+async def _handle_unexpected(request: Request, exc: Exception):
+    """沒預料到的錯誤也要講人話——至少講出例外型別與訊息。
+
+    這個站台有密碼保護，訊息只給承辦人看，可讀性優先於隱藏細節。
+    """
+    return JSONResponse(
+        {"detail": f"伺服器錯誤：{type(exc).__name__}: {exc}"[:600]},
+        status_code=500)
+
 
 # ── 密碼保護 ─────────────────────────────────────────────
 OPEN_PATHS = {"/login", "/api/login", "/api/auth-status", "/favicon.ico"}
@@ -198,6 +233,8 @@ def status(year: int | None = None, month: int | None = None):
         "dashboard_url": dashboard_url(meta.fiscal_year),
         "distribution_plan": {"path": str(plan) if plan else None,
                               "exists": plan is not None,
+                              "in_model": bool((_m := store.load_model(meta))
+                                               .get("distribution_plan", {}).get("schools")),
                               "period": meta.period,
                               "source": "Drive「贈經計畫」資料夾"
                                         if STORAGE_MODE == "drive"
@@ -206,7 +243,37 @@ def status(year: int | None = None, month: int | None = None):
         "storage_ready": (store.ready() if hasattr(store, "ready") else (True, "本機")),
         "model": store.load_model(meta) or None,
         "supported_ext": sorted(SUPPORTED),
+        "warnings": _warnings(),
     }
+
+
+def _ensure_plan_in_model(meta, model) -> str | None:
+    """年度贈經計畫是**整個財年的固定參考**，新月份要自動帶進資料模型。
+
+    先前只有「上傳當下」那個月的 model 有 distribution_plan，隔月產生報告時
+    -6 學校贈經統計表就是空的——介面卻寫著「一年上傳一次即可」。
+    2026-2027 這份計畫涵蓋 2026/6/1–2027/5/31，中間每個月都該吃到同一份。
+    """
+    cur = model.get("distribution_plan") or {}
+    if cur.get("period") == meta.period and cur.get("schools"):
+        return None
+    p = store.find_plan(meta.period)
+    if not p:
+        return None
+    from engine.parse_plan import parse as parse_plan
+    try:
+        plan = parse_plan(str(p), meta.period)
+    except Exception as exc:
+        return f"年度贈經計畫讀取失敗：{exc}"
+    if not plan.get("schools"):
+        return "；".join(plan.get("warnings", [])) or \
+            f"年度贈經計畫（{meta.period}）沒有可用排程"
+    merge(model, {"distribution_plan": plan}, f"贈經計畫:{meta.period}（固定參考自動帶入）")
+    store.save_model(meta, model)
+    from engine.parse_plan import schools_of_month
+    n = len(schools_of_month(plan, meta.report_year, meta.report_month))
+    return (f"已自動帶入 {meta.period} 年度贈經計畫："
+            f"全年 {len(plan['schools'])} 場，本月 {n} 場")
 
 
 # ── API：① 初始化當月 ────────────────────────────────────
@@ -221,7 +288,8 @@ def api_init(req: InitReq):
     meta = _meta(req.year, req.month, req.meeting_date)
     tpl = store.template_dir(meta)
     if tpl is None:
-        raise HTTPException(400, f"找不到 {meta.prev_year}年{meta.prev_month}月 的範本")
+        raise HTTPException(
+            400, _detail(f"找不到 {meta.prev_year}年{meta.prev_month}月 的範本"))
     res = gen.init_month(str(_work_dir(req.year, req.month).parent), meta,
                          template_dir=str(tpl))
     if not res["ok"]:
@@ -229,7 +297,10 @@ def api_init(req: InitReq):
     model = store.load_model(meta)
     model["meta"] = meta.to_dict()
     store.save_model(meta, model)
+    note = _ensure_plan_in_model(meta, model)
     res["meta"] = meta.to_dict()
+    res["plan_note"] = note
+    res["warnings"] = _warnings()
     return res
 
 
@@ -387,6 +458,7 @@ def api_commit(req: CommitReq):
     merge(model, req.patch, req.source or req.module)
     store.save_model(meta, model)
     return {"ok": True, "model": model,
+            "warnings": _warnings(),
             "affected_docs": AFFECTED_DOCS.get(req.module, [])}
 
 
@@ -405,12 +477,14 @@ def api_generate(req: GenReq):
     if not any(wd.glob("*.docx")):
         tpl = store.template_dir(meta)
         if tpl is None:
-            raise HTTPException(400, f"找不到 {meta.prev_year}年{meta.prev_month}月 的範本")
+            raise HTTPException(
+                400, _detail(f"找不到 {meta.prev_year}年{meta.prev_month}月 的範本"))
         init = gen.init_month(str(wd.parent), meta, template_dir=str(tpl))
         if not init["ok"]:
             raise HTTPException(400, init["error"])
 
     model = store.load_model(meta)
+    plan_note = _ensure_plan_in_model(meta, model)
     excel = wd / f"事工成果表_{req.year}_{req.month:02d}.xlsx"
     res = gen.generate_all(str(wd), meta, str(excel) if excel.exists() else None, model)
     if not res["ok"]:
@@ -418,6 +492,7 @@ def api_generate(req: GenReq):
     if req.only:
         res["results"] = [r for r in res["results"] if r["num"] in req.only]
     res["meta"] = meta.to_dict()
+    res["plan_note"] = plan_note
 
     # 雲端：/tmp 不持久，產完立刻送回 Drive
     if STORAGE_MODE == "drive":
@@ -425,6 +500,7 @@ def api_generate(req: GenReq):
             res["publish"] = store.publish(meta)
         except Exception as exc:
             res["publish"] = {"published": False, "error": str(exc)}
+    res["warnings"] = _warnings()
     return res
 
 
@@ -446,10 +522,7 @@ async def api_plan_upload(year: int = Form(...), month: int = Form(...),
     with open(tmp, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    try:
-        dest = store.save_plan(period, tmp)
-    except Exception as exc:
-        raise HTTPException(502, f"儲存失敗：{exc}")
+    dest = store.save_plan(period, tmp)
 
     # 解析並寫入資料模型——只存檔不解析的話，-6 不會有任何變化
     from engine.parse_plan import parse as parse_plan
@@ -472,7 +545,7 @@ async def api_plan_upload(year: int = Form(...), month: int = Form(...),
             "path": str(dest), "storage": STORAGE_MODE,
             "schools": plan["schools"], "total": len(plan["schools"]),
             "this_month": this_month,
-            "warnings": plan["warnings"],
+            "warnings": plan["warnings"] + _warnings(),
             "affected_docs": [5, 6]}
 
 
@@ -532,10 +605,10 @@ def drive_status():
 
 @app.post("/api/drive/authorize")
 def drive_authorize():
-    try:
-        drive.authorize(interactive=True)
-    except DriveNotConfigured as exc:
-        raise HTTPException(400, str(exc))
+    """本機：開瀏覽器完成 OAuth。雲端：不可能，直接說明要設哪些環境變數。"""
+    if auth.is_cloud():
+        raise HTTPException(400, CLOUD_AUTH_HINT)
+    drive.authorize(interactive=True)
     return {"ok": True, **drive.status()}
 
 
@@ -556,11 +629,7 @@ def drive_upload(req: UploadReq):
         excel = wd / f"事工成果表_{req.year}_{req.month:02d}.xlsx"
         if excel.exists():
             paths.append(str(excel))
-    try:
-        res = drive.upload_month(paths, meta.drive_folder_name)
-    except DriveNotConfigured as exc:
-        raise HTTPException(400, str(exc))
-    return res
+    return drive.upload_month(paths, meta.drive_folder_name)
 
 
 # ── 前端 ─────────────────────────────────────────────────

@@ -76,6 +76,9 @@
 
 <div class="wrap">
 
+  <!-- 儲存／授權警告（Drive 失效時最需要看到的一行）-->
+  <div id="warn-bar"></div>
+
   <!-- 月份與總控 -->
   <div class="card">
     <div class="row">
@@ -214,6 +217,7 @@
       <button id="btn-auth" class="ghost">連結 Google Drive</button>
       <span id="drive-state" class="badge">—</span>
     </div>
+    <div id="drive-note"></div>
     <div id="files"></div>
     <div id="drive-out"></div>
   </div>
@@ -279,9 +283,27 @@ async function refresh() {
     + '</table>' : '<p class="hint">尚未產生任何檔案。</p>';
 
   const d = s.drive;
-  $('#drive-state').textContent = d.authorized ? '✅ 已授權'
-    : d.client_secret_present ? '⚠️ 待授權' : '⚠️ 缺 client_secret.json';
-  $('#drive-state').className = 'badge ' + (d.authorized ? 'ok' : 'warn');
+  const driveOk = d.authorized && !d.error;
+  $('#drive-state').textContent = d.error ? '⛔ 授權已失效'
+    : d.mode === 'env' ? '✅ 已授權（環境變數）'
+    : d.mode === 'file' ? '✅ 已授權'
+    : d.client_secret_present ? '⚠️ 待授權' : '⚠️ 尚未設定憑證';
+  $('#drive-state').className = 'badge ' + (driveOk ? 'ok' : d.error ? 'err' : 'warn');
+  $('#drive-state').title = d.error || '';
+  $('#drive-note').innerHTML = d.error
+    ? `<p class="badge err" style="display:block;margin-top:8px">
+         ${esc(d.reauth_hint || d.error)}</p>`
+    : '';
+
+  // Drive 掛掉時檔案只留在雲端暫存區，這件事一定要講出來
+  const sr = s.storage_ready || [true, ''];
+  const warns = (s.warnings || []).slice();
+  if (s.storage === 'drive' && sr[0] === false)
+    warns.unshift(`Google Drive 未連線，本次產出只留在暫存區，離開前請按「下載 ZIP」。`);
+  $('#warn-bar').innerHTML = warns.length
+    ? warns.map(w => `<p class="badge warn" style="display:block;margin:0 0 8px">
+        ⚠️ ${esc(w)}</p>`).join('') : '';
+
   $('#footer').textContent = `本機資料夾：${s.base_dir}　支援格式：${s.supported_ext.join(' ')}`;
 }
 
@@ -394,12 +416,13 @@ function renderParse(mod, r) {
 async function commit(id) {
   const c = window[id];
   try {
-    await api('/api/commit', {
+    const r = await api('/api/commit', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ year: Y(), month: M(), module: c.mod,
                              patch: c.patch, source: c.source })
     });
-    alert('已寫入資料模型，可按「產生 10 份報告」套用。');
+    alert('已寫入資料模型，可按「產生 10 份報告」套用。'
+      + ((r.warnings && r.warnings.length) ? '\n\n⚠️ ' + r.warnings.join('\n⚠️ ') : ''));
     refresh();
   } catch (e) { alert(e.message); }
 }
@@ -570,7 +593,9 @@ async function loadAnalysis() {
 $('#btn-zip').onclick = () => location.href = `/api/download?year=${Y()}&month=${M()}`;
 
 $('#btn-auth').onclick = async () => {
-  $('#drive-out').innerHTML = '<p class="hint">已開啟瀏覽器授權視窗，請完成 Google 登入…</p>';
+  $('#drive-out').innerHTML = (STATE && STATE.storage === 'drive')
+    ? '<p class="hint">檢查雲端授權設定…</p>'
+    : '<p class="hint">已開啟瀏覽器授權視窗，請完成 Google 登入…</p>';
   try { await api('/api/drive/authorize', { method: 'POST' });
         $('#drive-out').innerHTML = '<p class="badge ok">Google Drive 已授權</p>'; }
   catch (e) { $('#drive-out').innerHTML = `<p class="badge err">${e.message}</p>`; }
