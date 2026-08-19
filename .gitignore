@@ -16,6 +16,10 @@ outputs/
 *.xlsx
 *.pdf
 !範本/**
+# 例外：雲端唯一的範本來源與年度贈經計畫，必須跟程式一起部署
+# ⚠️ templates/ 含會員個資與具名健康資訊 → repo 必須維持 private
+!templates/**
+!贈經計畫/**
 
 # Python
 __pycache__/
@@ -29,3 +33,6 @@ venv/
 
 # git bundle（開發歷史的搬運工具，不需進版控）
 *.bundle
+
+# 沙箱刪不掉的殘留檔（git 鎖檔、暫存物件）暫放處，可整個刪掉
+_to_delete/

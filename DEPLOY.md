@@ -35,21 +35,32 @@ cp .env.example .env
 | `APP_PASSWORD` | 無 | 未設時本機不驗證密碼 |
 | `SESSION_SECRET` | 由密碼衍生 | 設了之後換密碼不會登出所有人 |
 | `GIDEONS_BASE_DIR` | `~/Documents/海山支會` | 每月工作資料夾根目錄 |
-| `GIDEONS_CRED_DIR` | `./credentials` | Google OAuth 憑證與 token |
-| `GIDEONS_DRIVE_PARENT` | 專案指定 ID | Drive「月例會」資料夾 |
+| `GIDEONS_PLAN_DIR` | `../贈經計畫` | 年度聖經配送計畫存放處 |
+| `GIDEONS_TEMPLATE_DIR` | `./templates` | 固定範本（找不到上月資料夾時的回退）|
 
-### Google Drive 授權（首次一次即可）
+### 固定範本（雲端唯一的範本來源）
 
-1. [Google Cloud Console](https://console.cloud.google.com/) 建專案 → 啟用 **Google Drive API**
-2. 「API 和服務 → 憑證」→ 建立 **OAuth 用戶端 ID**，類型選**桌面應用程式**
-3. 下載 JSON，存成 `credentials/client_secret.json`
-4. 啟動 App → 按「連結 Google Drive」→ 瀏覽器完成授權
-   token 存到 `credentials/token.json`，之後自動續用
+`templates/` 裡放一組完整的 11 份 docx，跟程式一起部署。
+本機執行時**優先用 `~/Documents/海山支會/{上月}月例會`**，找不到才回退到它；
+雲端沒有那個資料夾，所以永遠用它。
 
-> ⚠️ 若同意畫面還在「測試中」，要把自己加進測試使用者，且 refresh token
-> **7 天就過期**。這不是小事：token 一過期，雲端版每個要寫 Drive 的動作
-> 都會失敗（2026-08 就是這樣整站看起來壞掉）。
-> **長期使用請務必把應用程式狀態發布為正式版**，再重新取一次 token。
+畫面「範本來源／範本月份」會顯示這次實際用了哪一組——**務必確認**，
+因為固定範本停在某個月份（例如 115年7月），日期替換是以它為基準。
+
+想更新雲端的起點（建議每隔幾個月做一次）：
+
+```bash
+cd ~/Claude/Projects/基甸會月例會報告/gideons-report-app
+rm -f templates/*.docx
+cp ~/Documents/海山支會/2026年8月月例會/月例會議程*.docx templates/
+git add templates && git commit -m "更新固定範本至 115年8月" && git push
+```
+
+> ⚠️ 這些 docx 含會員個資與 -7 的具名健康資訊，`.gitignore` 對 `templates/`
+> 開了例外才進得了版控。**repo 必須維持 private。**
+
+年度贈經計畫同理：`贈經計畫/{period}_聖經配送計畫.xlsx` 也在 repo 裡，
+換財年時 commit 一次即可（雲端上傳只在本次工作階段有效）。
 
 ### 疑難排解
 
@@ -57,10 +68,9 @@ cp .env.example .env
 |---|---|
 | `No module named fastapi` | `.venv` 沒啟用，直接跑 `python3 run.py` |
 | `python3 -m venv` 失敗 | macOS 缺 Command Line Tools：`xcode-select --install` |
-| Drive 顯示「待授權」 | 按「連結 Google Drive」；測試模式 token 7 天過期 |
-| 找不到範本資料夾 | 確認 `~/Documents/海山支會/{年}年{月}月例會` 存在 |
+| 找不到範本資料夾 | 確認 `~/Documents/海山支會/{年}年{月}月例會` 存在；沒有的話會自動用 `templates/` |
+| 範本月份不對 | 看畫面「範本來源」。要換就更新 `templates/` 內容 |
 | 擷取資料失敗 | 確認網路可連 `gideons-dashboard.pointing.tw` |
-| `invalid_grant` / 「授權已失效」 | refresh token 過期。同意畫面**發布為正式版**後重新授權，再更新 Vercel 的 `GOOGLE_REFRESH_TOKEN` |
 
 ---
 
@@ -89,40 +99,23 @@ git push -u origin main
 | | 本機 | Vercel |
 |---|---|---|
 | 進入點 | `run.py` → `app.py` | `api/index.py` → `app.py` |
-| 儲存 | `~/Documents/海山支會` | Google Drive（`/tmp` 僅單次請求） |
-| 授權 | `credentials/token.json` | 環境變數 refresh token |
+| 儲存 | `~/Documents/海山支會`（永久） | `/tmp`，**單次工作階段** |
+| 範本 | 上月本機資料夾 →（沒有就）`templates/` | `templates/` |
+| 年度計畫 | 專案旁的 `贈經計畫/` | repo 的 `贈經計畫/` |
+| 輸出 | 下載 ZIP | 下載 ZIP（唯一管道） |
 | 密碼 | 可不設 | **必填**，未設回 503 |
-| 範本 | 上月本機資料夾 | Drive 的「{年}年{MM}月」資料夾 |
 
-App 偵測到 `VERCEL` 環境變數就自動切成 Drive 儲存層並改用 `/tmp`。
+App 偵測到 `VERCEL` 環境變數就把工作區改到 `/tmp`。沒有任何外部儲存、
+沒有任何會過期的憑證——這是刻意的。
 
-### 1. 取出 refresh token
-
-在本機已授權的狀態下執行（**輸出含機密，不要貼到任何聊天或公開場合**）：
-
-```bash
-python3 -c "
-import json
-t = json.load(open('credentials/token.json'))
-c = json.load(open('credentials/client_secret.json'))['installed']
-print('GOOGLE_CLIENT_ID    =', c['client_id'])
-print('GOOGLE_CLIENT_SECRET=', c['client_secret'])
-print('GOOGLE_REFRESH_TOKEN=', t['refresh_token'])
-"
-```
-
-> ⚠️ 這組 token 有你 Drive 的**完整讀寫權限**，不限月例會資料夾。
-> 若外流，立刻到 [Google 帳號權限頁](https://myaccount.google.com/permissions)
-> 移除此應用程式，再重新授權。
-
-### 2. 建立專案
+### 1. 建立專案
 
 1. [vercel.com](https://vercel.com) → **Add New… → Project** → 匯入 repo
 2. Team 選 `richardlai1973-3671s-projects`
 3. **Root Directory 留空**（repo 根目錄就是 app 本身）
 4. 先設環境變數，再 Deploy
 
-### 3. 環境變數
+### 2. 環境變數
 
 Project → Settings → Environment Variables，全部套用到 Production：
 
@@ -130,19 +123,17 @@ Project → Settings → Environment Variables，全部套用到 Production：
 |---|---|
 | `APP_PASSWORD` | 你設定的密碼 |
 | `SESSION_SECRET` | `python3 -c "import secrets;print(secrets.token_urlsafe(32))"` |
-| `GOOGLE_CLIENT_ID` | 步驟 1 取得 |
-| `GOOGLE_CLIENT_SECRET` | 步驟 1 取得 |
-| `GOOGLE_REFRESH_TOKEN` | 步驟 1 取得 |
-| `GIDEONS_DRIVE_PARENT` | `15HBrIm4TOJrIMHo6ydHR2bWHN0ZTrWJ5` |
 
-`STORAGE` 會自動設為 `drive`，可省略。
+只有這兩個。舊版的 `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` /
+`GOOGLE_REFRESH_TOKEN` / `GIDEONS_DRIVE_PARENT` **可以全部刪掉**。
 
-### 4. 驗證
+### 3. 驗證
 
 開啟部署網址 → 應出現**密碼登入頁**（看到登入頁就表示路由通了）。
-登入後檢查狀態列：儲存應顯示 Google Drive、範本應顯示已就緒。
+登入後檢查狀態列：「範本來源」應顯示「內建固定範本（115年X月）」、
+年度贈經計畫應顯示已就緒，畫面上方會有一行黃字提醒產出只留在本次工作階段。
 
-流程與本機相同，差別是產出後**自動上傳回 Drive** 的「{年}年{MM}月」資料夾。
+流程與本機相同，差別是**做完要立刻按「下載 ZIP」**——雲端不留檔。
 
 ### Vercel 疑難排解
 
@@ -176,31 +167,19 @@ Project → Settings → Environment Variables，全部套用到 Production：
 
 → `functions` 的鍵指到了 `api/` 以外的檔案，改成 `api/index.py`。
 
-#### 「Internal Server Error」／狀態列顯示「⛔ 授權已失效」
-
-Drive 的 refresh token 過期或被撤銷（`invalid_grant`）。現在介面會直接寫出原因
-與三步驟，照做即可：
-
-1. Google Cloud Console → OAuth 同意畫面 → **發布為正式版**（測試中只有 7 天）
-2. 本機跑 `python3 run.py` → 按「連結 Google Drive」重新授權
-3. 用本章「1. 取出 refresh token」的指令取新值 → 更新 Vercel 環境變數
-   `GOOGLE_REFRESH_TOKEN` → **Redeploy**
-
-授權壞掉時系統不會整個停擺：資料仍寫入雲端暫存區，可正常產出並「下載 ZIP」，
-只是離開網頁後不保留，介面會以黃字提醒。
-
 #### 部署成功但 500 或頁面空白
 
-看 Vercel 的 **Logs** 分頁。最常見是環境變數漏設，此時狀態列的
-「Drive」會顯示未授權。
+看 Vercel 的 **Logs** 分頁。最常見是 `APP_PASSWORD` 漏設（會回 503）。
+其他錯誤現在都會以中文 JSON 回傳（`{"detail": "伺服器錯誤：..."}`），
+介面直接顯示，不會再只看到「Internal Server Error」。
 
 ### 已知限制
 
 | 項目 | 說明 |
 |---|---|
-| 執行時間 | `maxDuration: 60`，Hobby 方案上限即 60 秒。產 11 份 docx 加 Drive 上下傳若逼近上限，需改 Pro 或分批 |
-| `/tmp` 不保證保留 | 每次都從 Drive 重新同步，不影響正確性，只是稍慢 |
-| Drive API 配額 | 每次產出約 20–30 次呼叫，個人帳號額度充足 |
+| 執行時間 | `maxDuration: 60`，Hobby 方案上限即 60 秒。產 11 份 docx 綽綽有餘 |
+| `/tmp` 不保證保留 | **雲端沒有持久儲存**：產出後要立刻下載 ZIP，否則可能要重跑 |
+| 範本會過時 | 固定範本停在 commit 當下的月份；隔幾個月更新一次比較好 |
 | 部署尺寸 | 若超限可從 `requirements.txt` 移除 `pdfplumber`（只失去 PDF 解析） |
 
 ---
@@ -219,8 +198,8 @@ Drive 的 refresh token 過期或被撤銷（`invalid_grant`）。現在介面�
 
 ## 安全提醒
 
-部署到公開網址後，**密碼是唯一的一道門**，而 `GOOGLE_REFRESH_TOKEN`
-讓這個網站能操作你**整個 Drive**——不只月例會資料夾。
+部署到公開網址後，**密碼是唯一的一道門**。而且 `templates/` 裡那 11 份
+docx 就在 repo 裡、也在部署的檔案系統裡——**repo 必須 private**。
 
 報告內容含會員個資、奉獻金額，以及 `-7代禱項目` 裡的**具名健康狀況**
 （手術、復健、失智等，涉及會員本人與家屬）。這些人同意在支會內部傳閱，
@@ -230,6 +209,6 @@ Drive 的 refresh token 過期或被撤銷（`invalid_grant`）。現在介面�
 
 - 密碼用隨機字串，不要用支會名或常見單字
 - 網址不要公開張貼
-- 懷疑外流時：先到 Google 帳號權限頁撤銷授權，再換 `APP_PASSWORD`
+- 懷疑外流時：換 `APP_PASSWORD` 並重新部署
 - 「只有我們知道網址」不是存取控制——Vercel 網址會出現在
   Certificate Transparency 公開紀錄，有人專門在掃新網域

@@ -3,7 +3,7 @@
 把每月 11 份月例會 Word 報告的手工作業，變成瀏覽器上的幾分鐘檢核。
 
 ```
-輸入介面 → 檔案解析層 → 統一資料模型(JSON) → docx 產出引擎 → 下載 / Google Drive
+輸入介面 → 檔案解析層 → 統一資料模型(JSON) → docx 產出引擎 → 下載 ZIP
 ```
 
 ## 文件導覽
@@ -22,19 +22,22 @@
 python3 run.py            # → http://127.0.0.1:8848
 ```
 
-首次會自動建 `.venv`、安裝套件。詳細設定與 Google Drive 授權見
-[DEPLOY.md](DEPLOY.md)。
+首次會自動建 `.venv`、安裝套件。詳細設定見 [DEPLOY.md](DEPLOY.md)。
+
+> 產出一律以**下載 ZIP**帶走（11 份 docx）。系統不連任何雲端硬碟——
+> 之前接 Google Drive，OAuth token 每 7 天過期一次，整個雲端版就跟著壞。
 
 ---
 
 ## 每月操作流程
 
 1. **確認月份** — 預設當月，會議日期自動帶入該月第四個禮拜天（可覆寫）
-2. **① 初始化** — 由上月 11 份 docx 複製並重新命名
+2. **① 初始化** — 由範本複製並重新命名（本機用上月資料夾；找不到就用
+   repo 內建的固定範本，畫面會標示實際範本月份）
 3. **② 行政財務** — 取得事工成果資料（見下節），核對後按「✓ 確認並套用」
 4. **③④⑤** — 視需要上傳 LINE 文字、代禱資料、贈經排程
 5. **產生報告** — 逐檔更新日期與數據，畫面列出每份的變更明細
-6. **下載 ZIP** 或 **上傳 Google Drive**（自動建月份資料夾、同名覆寫）
+6. **下載 ZIP** — 11 份 docx 一次帶走，自行放進 `~/Documents/海山支會/` 或雲端硬碟
 
 每份上傳都會**先顯示解析結果供確認**，按了才寫入資料模型
 （human-in-the-loop）。
@@ -104,18 +107,19 @@ gideons-report-app/
 │  ├─ parse_files.py    各格式分派、LINE 解析
 │  ├─ grafana.py        免登入查 dashboard
 │  ├─ build_excel.py    由 API 重建成果表
-│  ├─ drive.py          Drive 授權與上傳
-│  ├─ storage.py        本機／Drive 儲存層
+│  ├─ storage.py        本機檔案系統 + 固定範本回退
 │  └─ auth.py           密碼保護
+├─ templates/           **固定範本**（11 份 docx，雲端唯一來源）
+├─ 贈經計畫/            年度聖經配送計畫 xlsx（整個財年固定）
 ├─ models/model.py      統一資料模型
-└─ tests/               27 項單元測試
+└─ tests/               39 項單元測試
 ```
 
 ## API
 
 | 方法 | 路徑 | 說明 |
 |---|---|---|
-| GET | `/api/status` | 月份衍生值、檔案狀態、Drive 狀態 |
+| GET | `/api/status` | 月份衍生值、檔案狀態、範本來源 |
 | POST | `/api/init` | 複製前月範本並重新命名 |
 | POST | `/api/parse` | 上傳並解析單一檔案（不寫入） |
 | POST | `/api/commit` | 確認後寫入資料模型 |
@@ -123,8 +127,7 @@ gideons-report-app/
 | POST | `/api/grafana/fetch` | 擷取本財年資料（不寫入） |
 | POST | `/api/grafana/excel` | 產生成果表 Excel |
 | GET | `/api/analysis` | 事工成果表分析 |
-| GET | `/api/download` | 下載單檔或整月 ZIP |
-| POST | `/api/publish` | 送出產出（雲端＝上傳 Drive） |
+| GET | `/api/download` | 下載單檔或整月 ZIP（唯一的輸出管道） |
 | POST | `/api/login` `/api/logout` | 密碼登入 |
 
 ---
@@ -141,6 +144,12 @@ gideons-report-app/
 
 工作資料含會員個資、奉獻金額，以及 `-7代禱項目` 裡的**具名健康狀況**。
 
-`.gitignore` 已排除 `*.docx`、`*.xlsx`、`_inputs/`、`credentials/`、`.env`。
+`.gitignore` 已排除 `*.docx`、`*.xlsx`、`_inputs/`、`credentials/`、`.env`，
+**但 `templates/` 與 `贈經計畫/` 是刻意的例外**——雲端沒有它們就沒有範本。
+
+> ⚠️ 也就是說 `templates/` 裡那 11 份 docx（含 -7 代禱的具名健康狀況、
+> -10 會員名冊）**在 repo 裡**。這個 repo 必須維持 **private**。
+> 換範本時記得同時檢查內容是不是你願意放進版控的版本。
+
 推上遠端前請再確認 `git status`。對外部署的注意事項見
 [DEPLOY.md 安全提醒](DEPLOY.md#安全提醒)。

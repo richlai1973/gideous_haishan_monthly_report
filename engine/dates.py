@@ -86,16 +86,21 @@ class Meta:
     prev_meeting_date: str
     period: str                # 財年期間，如 "2026-2027"
     work_dir_name: str         # "2026年7月月例會"
-    drive_folder_name: str     # "2026年7月"
     dashboard_url: str
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-def build_meta(year: int, month: int, meeting_date: str | None = None) -> Meta:
-    """由報告年月推導全部衍生欄位。meeting_date 可覆寫（YYYY-MM-DD）。"""
-    py, pm = template_month(year, month)
+def build_meta(year: int, month: int, meeting_date: str | None = None,
+               template_ym: tuple[int, int] | None = None) -> Meta:
+    """由報告年月推導全部衍生欄位。meeting_date 可覆寫（YYYY-MM-DD）。
+
+    `template_ym` 覆寫「範本月份」。預設是上個月，但改用 repo 內建的固定範本時
+    範本停在某一個月（如 115年7月），`prev_*` 必須跟著它走——update_dates() 全部
+    的替換都以 prev_* 為來源字串，對不上就一個字都換不到。
+    """
+    py, pm = template_ym or template_month(year, month)
     ny, nm = next_month(year, month)
     fy = fiscal_year_of(year, month)
 
@@ -119,7 +124,5 @@ def build_meta(year: int, month: int, meeting_date: str | None = None) -> Meta:
         prev_meeting_date=fourth_sunday(py, pm).isoformat(),
         period=f"{fy - 1}-{fy}",
         work_dir_name=f"{year}年{month}月月例會",
-        # Drive 既有資料夾為零補位兩位數（2026年06月），與本機資料夾命名不同
-        drive_folder_name=f"{year}年{month:02d}月",
         dashboard_url=dashboard_url(fy),
     )

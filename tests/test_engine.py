@@ -39,8 +39,6 @@ def test_build_meta():
     assert (m.roc_year, m.prev_month, m.fiscal_year) == (115, 6, 2027)
     assert m.meeting_date == "2026-07-26"
     assert m.period == "2026-2027"
-    # Drive 既有資料夾為零補位（2026年06月），與本機 2026年7月月例會 不同
-    assert m.drive_folder_name == "2026年07月"
     assert m.work_dir_name == "2026年7月月例會"
     assert "var-year=2027" in m.dashboard_url
 
@@ -283,7 +281,7 @@ def test_local_plan_lookup_and_save(tmp_path):
     """本機版從「贈經計畫」資料夾找檔；上傳後應立刻找得到。"""
     from engine.storage import LocalStorage, plan_filename
     base, plans = tmp_path / "base", tmp_path / "plans"
-    s = LocalStorage(base, plans)
+    s = LocalStorage(base, [plans])
     assert s.find_plan("2026-2027") is None
 
     src = tmp_path / "上傳.xlsx"
@@ -297,21 +295,7 @@ def test_local_plan_lookup_and_save(tmp_path):
 def test_local_plan_dir_defaults_beside_base(tmp_path):
     from engine.storage import PLAN_FOLDER, LocalStorage
     s = LocalStorage(tmp_path / "海山支會")
-    assert s.plan_dir == tmp_path / "海山支會" / PLAN_FOLDER
-
-
-def test_drive_plan_degrades_without_credentials():
-    """Drive 沒授權時 find_plan 要回 None 而非拋例外（狀態頁才不會 500）。"""
-    from engine.storage import DriveStorage
-
-    class Broken:
-        def __getattr__(self, name):
-            def boom(*a, **k):
-                raise RuntimeError("尚未授權")
-            return boom
-
-    s = DriveStorage(Broken(), tmp_root="/tmp/gideons-test-plan")
-    assert s.find_plan("2026-2027") is None
+    assert s.plan_dirs[0] == tmp_path / "海山支會" / PLAN_FOLDER
 
 
 # ── 年度贈經計畫解析 ─────────────────────────────────────
@@ -465,64 +449,6 @@ def test_split_and_filter_month():
     assert r["range"] == ("2026-06-01", "2026-07-02")
 
 
-# ── Drive 授權失效不得變成 500 ────────────────────────────
-# 真實事故：refresh token 過期（OAuth 同意畫面停在「測試中」只給 7 天），
-# 每個要動 Drive 的請求都 invalid_grant，前端只看得到「Internal Server Error」。
-class _FakeCreds:
-    def refresh(self, request):
-        from google.auth.exceptions import RefreshError
-        raise RefreshError("invalid_grant: Bad Request",
-                           {"error": "invalid_grant"})
-
-
-def test_drive_refresh_error_becomes_readable_message(tmp_path):
-    from engine.drive import DriveAuthExpired, DriveClient
-    c = DriveClient(str(tmp_path))
-    try:
-        c._do_refresh(_FakeCreds(), lambda: None)
-    except DriveAuthExpired as exc:
-        assert "invalid_grant" in str(exc) and "重新授權" in str(exc)
-    else:
-        raise AssertionError("授權過期必須轉成 DriveAuthExpired")
-    assert c.status()["error"]                  # 狀態列要看得到原因
-
-
-def test_drive_status_env_mode(tmp_path, monkeypatch):
-    """雲端沒有 client_secret.json，授權走環境變數——不能再顯示「缺憑證」。"""
-    from engine.drive import DriveClient
-    for k in ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"):
-        monkeypatch.setenv(k, "x")
-    st = DriveClient(str(tmp_path)).status()
-    assert st["mode"] == "env" and st["authorized"] is True
-
-
-class _DeadDrive:
-    """任何 Drive 呼叫都失敗，模擬授權過期。"""
-    def ensure_folder(self, *a, **k):
-        from engine.drive import DriveAuthExpired
-        raise DriveAuthExpired("授權已失效")
-
-    def upload_file(self, *a, **k):
-        raise AssertionError("不該走到上傳")
-
-    def find_folder(self, *a, **k):
-        from engine.drive import DriveAuthExpired
-        raise DriveAuthExpired("授權已失效")
-
-
-def test_save_model_degrades_with_warning(tmp_path):
-    """Drive 掛掉時：資料照樣寫進工作區，但必須留下警告，不能靜默成功。"""
-    from engine.dates import build_meta
-    from engine.storage import DriveStorage
-    st = DriveStorage(_DeadDrive(), tmp_root=str(tmp_path))
-    meta = build_meta(2026, 7)
-    st.save_model(meta, {"a": 1})
-    assert (st.work_dir(meta) / "_inputs" / "model.json").exists()
-    w = st.take_warnings()
-    assert any("Drive" in x for x in w)
-    assert st.take_warnings() == []             # 取出後清空，不會重複顯示
-
-
 # ── 年度贈經計畫是「固定參考」，不是「上傳當月才有」────────
 def _mini_plan_xlsx(path, period="2026-2027"):
     """最小可解析版面：第 1 列年度標題、第 2 列欄位標頭、第 3 列起資料。"""
@@ -575,37 +501,57 @@ def test_undated_sessions_never_autofill():
     assert [s["school"] for s in schools_of_month(plan, 2027, 4)] == ["鳳鳴國中"]
 
 
-def test_expired_local_token_falls_back_to_browser_flow(tmp_path, monkeypatch):
-    """本機 token 過期時，按「連結 Google Drive」要能直接重新授權。
 
-    否則使用者得先自己刪 credentials/token.json 才救得回來。
+
+# ── 固定範本（雲端沒有 Drive 之後唯一的範本來源）────────────
+def _fake_templates(d, roc_year=115, month=7):
+    d.mkdir(parents=True, exist_ok=True)
+    for suffix in ("-1議程", "-2事工成果統計表", "-A.行事曆2026-2027北區"):
+        (d / f"月例會議程{roc_year}年{month}月{suffix}.docx").write_bytes(b"PK\x03\x04")
+    return d
+
+
+def test_template_month_read_from_filenames(tmp_path):
+    """範本月份一律以檔名為準（民國 115年7月 → 西元 2026, 7）。"""
+    from engine.storage import template_month_of
+    assert template_month_of(_fake_templates(tmp_path / "t")) == (2026, 7)
+    empty = tmp_path / "t2"
+    empty.mkdir()
+    assert template_month_of(empty) is None
+
+
+def test_template_falls_back_to_fixed_when_month_folder_missing(tmp_path):
+    from engine.dates import build_meta
+    from engine.storage import LocalStorage
+    base = tmp_path / "海山支會"
+    fixed = _fake_templates(tmp_path / "templates")
+    s = LocalStorage(base, [tmp_path / "plans"], fixed)
+    meta = build_meta(2026, 9)                      # 上月＝2026年8月，資料夾不存在
+    assert s.month_template_dir(meta) is None
+    assert s.template_dir(meta) == fixed
+
+    real = base / "2026年8月月例會"                  # 有上月資料夾時它優先
+    _fake_templates(real, 115, 8)
+    assert s.template_dir(meta) == real
+
+
+def test_fixed_template_rebuilds_meta_month(tmp_path, monkeypatch):
+    """用固定範本時 meta.prev_* 必須指向範本的月份。
+
+    否則 update_dates() 要找的是「8月」而範本寫的是「7月」，一個字都換不到，
+    產出會安靜地留在舊日期——這比報錯更難發現。
     """
-    from engine import drive as D
-    c = D.DriveClient(str(tmp_path))
-    (tmp_path / "token.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(D, "_is_cloud", lambda: False)
+    import importlib
+    fixed = _fake_templates(tmp_path / "templates")
+    monkeypatch.setenv("GIDEONS_BASE_DIR", str(tmp_path / "海山支會"))
+    monkeypatch.setenv("GIDEONS_TEMPLATE_DIR", str(fixed))
+    monkeypatch.setenv("GIDEONS_PLAN_DIR", str(tmp_path / "plans"))
+    monkeypatch.delenv("VERCEL", raising=False)
+    import app as A
+    A = importlib.reload(A)
 
-    class _Expired:
-        expired, valid, refresh_token = True, False, "x"
-
-    class _Flow:
-        @staticmethod
-        def from_client_secrets_file(path, scopes):
-            class F:
-                @staticmethod
-                def run_local_server(**kw):
-                    class C:
-                        valid = True
-                        def to_json(self): return "{}"
-                    return C()
-            return F()
-
-    monkeypatch.setattr(D, "_import_libs", lambda: (
-        object, type("Cr", (), {"from_authorized_user_file":
-                                staticmethod(lambda *a: _Expired())}),
-        _Flow, lambda *a, **k: "service", object))
-    monkeypatch.setattr(c, "_do_refresh", lambda *a: (_ for _ in ()).throw(
-        D.DriveAuthExpired("過期")))
-    (tmp_path / "client_secret.json").write_text("{}", encoding="utf-8")
-
-    assert c.authorize(interactive=True) == "service"   # 沒有丟例外
+    meta, tpl, label = A.resolve_template(2026, 9)   # 報告 9 月，範本卻是 7 月
+    assert tpl == fixed
+    assert (meta.prev_year, meta.prev_month) == (2026, 7)
+    assert meta.prev_meeting_date == "2026-07-26"    # 第四個禮拜天，換日期用得到
+    assert "固定範本" in label

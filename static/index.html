@@ -76,7 +76,7 @@
 
 <div class="wrap">
 
-  <!-- 儲存／授權警告（Drive 失效時最需要看到的一行）-->
+  <!-- 儲存警告（雲端只有暫存區，這行最需要被看到）-->
   <div id="warn-bar"></div>
 
   <!-- 月份與總控 -->
@@ -212,14 +212,10 @@
   <div class="card">
     <h3>產出結果</h3>
     <div class="bar">
-      <button id="btn-zip" class="ghost">下載 ZIP</button>
-      <button id="btn-drive">上傳 Google Drive（覆寫）</button>
-      <button id="btn-auth" class="ghost">連結 Google Drive</button>
-      <span id="drive-state" class="badge">—</span>
+      <button id="btn-zip">下載 ZIP（全部 docx）</button>
+      <span class="hint" id="zip-hint"></span>
     </div>
-    <div id="drive-note"></div>
     <div id="files"></div>
-    <div id="drive-out"></div>
   </div>
 
   <p class="hint" id="footer"></p>
@@ -261,10 +257,10 @@ async function refresh() {
     <div><b>會議日期</b>${m.meeting_date}</div>
     <div><b>下次月例會</b>${m.next_meeting_date}</div>
     <div><b>財年 (var-year)</b>${m.fiscal_year}</div>
-    <div><b>範本資料夾</b>${s.template_exists ? '✅ 已就緒' : '⚠️ 不存在'}</div>
+    <div><b>範本月份</b>${s.template_exists ? '✅ ' + esc(s.template_month || '已就緒') : '⚠️ 找不到'}</div>
     <div><b>工作資料夾</b>${s.work_dir_exists ? '✅ ' + m.work_dir_name : '尚未建立'}</div>
     <div><b>年度贈經計畫</b>${s.distribution_plan.exists ? '✅ ' + m.period : '⚠️ 待上傳（模組⑤）'}</div>
-    <div><b>Drive 目標</b>${m.drive_folder_name}</div>`;
+    <div><b>範本來源</b>${esc(s.template_source || '—')}</div>`;
 
   const dp = s.distribution_plan;
   $('#plan-badge').textContent = dp.exists ? `✅ ${dp.period}` : '⚠️ 待上傳';
@@ -282,29 +278,18 @@ async function refresh() {
       <td><a href="/api/download?year=${Y()}&month=${M()}&name=${encodeURIComponent(f.name)}">下載</a></td></tr>`).join('')
     + '</table>' : '<p class="hint">尚未產生任何檔案。</p>';
 
-  const d = s.drive;
-  const driveOk = d.authorized && !d.error;
-  $('#drive-state').textContent = d.error ? '⛔ 授權已失效'
-    : d.mode === 'env' ? '✅ 已授權（環境變數）'
-    : d.mode === 'file' ? '✅ 已授權'
-    : d.client_secret_present ? '⚠️ 待授權' : '⚠️ 尚未設定憑證';
-  $('#drive-state').className = 'badge ' + (driveOk ? 'ok' : d.error ? 'err' : 'warn');
-  $('#drive-state').title = d.error || '';
-  $('#drive-note').innerHTML = d.error
-    ? `<p class="badge err" style="display:block;margin-top:8px">
-         ${esc(d.reauth_hint || d.error)}</p>`
-    : '';
-
-  // Drive 掛掉時檔案只留在雲端暫存區，這件事一定要講出來
-  const sr = s.storage_ready || [true, ''];
+  // 雲端沒有任何持久儲存：產出只活在這次工作階段，一定要講出來
   const warns = (s.warnings || []).slice();
-  if (s.storage === 'drive' && sr[0] === false)
-    warns.unshift(`Google Drive 未連線，本次產出只留在暫存區，離開前請按「下載 ZIP」。`);
+  if (s.cloud)
+    warns.unshift('雲端版沒有持久儲存：產出只留在本次工作階段，完成後請立即「下載 ZIP」。');
   $('#warn-bar').innerHTML = warns.length
     ? warns.map(w => `<p class="badge warn" style="display:block;margin:0 0 8px">
         ⚠️ ${esc(w)}</p>`).join('') : '';
+  $('#zip-hint').textContent = s.ready
+    ? `${s.ready} 份 docx${s.cloud ? '（雲端暫存，請立即下載）' : ''}`
+    : '尚未產生檔案';
 
-  $('#footer').textContent = `本機資料夾：${s.base_dir}　支援格式：${s.supported_ext.join(' ')}`;
+  $('#footer').textContent = `資料位置：${s.base_dir}　支援格式：${s.supported_ext.join(' ')}`;
 }
 
 // ── 動作 ──────────────────────────────────────────────
@@ -327,7 +312,10 @@ $('#btn-gen').onclick = async (e) => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ year: Y(), month: M(), meeting_date: $('#meeting').value })
     });
-    $('#p1-out').innerHTML = '<table><tr><th>#</th><th>文件</th><th>狀態</th><th>變更</th></tr>' +
+    $('#p1-out').innerHTML =
+      `<p class="badge">範本來源：${esc(r.template_source || '—')}</p>` +
+      (r.plan_note ? `<p class="badge ok">${esc(r.plan_note)}</p>` : '') +
+      '<table><tr><th>#</th><th>文件</th><th>狀態</th><th>變更</th></tr>' +
       r.results.map(x => `<tr>
         <td>${x.num}</td><td>${x.file}</td>
         <td><span class="dot ${x.status === 'ok' ? (x.data_updated ? 'g' : 'y') : 'r'}"></span>
@@ -438,7 +426,7 @@ $('#btn-plan').onclick = async (e) => {
     const r = await api('/api/plan/upload', { method: 'POST', body: fd });
     $('#out-plan').innerHTML = `
       <p class="badge ok">已存入並解析 ${esc(r.period)} 年度計畫 —— ${esc(r.file)}
-        （${r.storage === 'drive' ? 'Google Drive' : '本機'}）· 全年 ${r.total} 場</p>
+        （${r.storage === 'cloud-temp' ? '雲端暫存' : '本機'}）· 全年 ${r.total} 場</p>
       ${r.warnings.length ? `<p class="hint">⚠️ ${r.warnings.map(esc).join('<br>⚠️ ')}</p>` : ''}
       <h3 style="margin-top:12px">本月場次（${r.this_month.length}）— 會寫入 -6 學校贈經統計表</h3>
       ${r.this_month.length ? `<table><tr><th>日期</th><th>項目</th><th>學校</th>
@@ -589,38 +577,8 @@ async function loadAnalysis() {
   } catch (e) { out.innerHTML = `<p class="badge warn">${e.message}</p>`; }
 }
 
-// ── 下載 / Drive ──────────────────────────────────────
+// ── 下載 ──────────────────────────────────────────────
 $('#btn-zip').onclick = () => location.href = `/api/download?year=${Y()}&month=${M()}`;
-
-$('#btn-auth').onclick = async () => {
-  $('#drive-out').innerHTML = (STATE && STATE.storage === 'drive')
-    ? '<p class="hint">檢查雲端授權設定…</p>'
-    : '<p class="hint">已開啟瀏覽器授權視窗，請完成 Google 登入…</p>';
-  try { await api('/api/drive/authorize', { method: 'POST' });
-        $('#drive-out').innerHTML = '<p class="badge ok">Google Drive 已授權</p>'; }
-  catch (e) { $('#drive-out').innerHTML = `<p class="badge err">${e.message}</p>`; }
-  refresh();
-};
-
-$('#btn-drive').onclick = async (e) => {
-  e.target.disabled = true; e.target.textContent = '上傳中…';
-  try {
-    const r = await api('/api/drive/upload', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ year: Y(), month: M(), include_excel: true })
-    });
-    $('#drive-out').innerHTML =
-      `<p class="badge ok">資料夾「${r.folder.name}」${r.folder.created ? '已建立' : '已存在'}
-        <a href="${r.folder.url}" target="_blank">在 Drive 開啟</a></p>
-      <table><tr><th>檔案</th><th>結果</th><th></th></tr>` +
-      r.uploaded.map(f => `<tr><td>${f.name}</td>
-        <td><span class="badge ok">${f.action === 'overwritten' ? '覆寫' : '新建'}</span></td>
-        <td><a href="${f.url}" target="_blank">開啟</a></td></tr>`).join('') +
-      r.errors.map(f => `<tr><td>${f.file}</td><td><span class="badge err">失敗</span></td>
-        <td>${f.error}</td></tr>`).join('') + '</table>';
-  } catch (err) { $('#drive-out').innerHTML = `<p class="badge err">${err.message}</p>`; }
-  e.target.disabled = false; e.target.textContent = '上傳 Google Drive（覆寫）';
-};
 
 // ── 初始化 ────────────────────────────────────────────
 (async () => {

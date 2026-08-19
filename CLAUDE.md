@@ -10,8 +10,11 @@
 
 ```
 python3 run.py                 # 本機 → http://127.0.0.1:8848
-python3 -m pytest tests/ -q    # 測試（目前 27 項，改動後必跑）
+python3 -m pytest tests/ -q    # 測試（目前 39 項，改動後必跑）
 ```
+
+**唯一的輸出管道是「下載 ZIP」。** 系統不連任何雲端硬碟，也沒有其他外部
+儲存——這是 2026-08 拿掉 Google Drive 後的定調，別再加回來（原因見下）。
 
 ## 架構速覽
 
@@ -26,14 +29,19 @@ engine/
   parse_files.py     txt/csv/xlsx/pdf/jpeg 分派；LINE 聊天記錄按月篩選
   grafana.py         免登入查 dashboard 資料源（/api/ds/query）
   build_excel.py     由 API 資料重建官方版面的成果表 Excel
-  drive.py           Google Drive OAuth／環境變數授權、覆寫上傳
-  storage.py         LocalStorage / DriveStorage 抽象
+  storage.py         本機檔案系統；範本回退、年度計畫查找
   auth.py            單一共用密碼（HMAC cookie）
+templates/           固定範本 11 份 docx（雲端唯一的範本來源）
+贈經計畫/            年度聖經配送計畫 xlsx（雲端唯一的計畫來源）
 ```
 
-儲存層的關鍵設計：`work_dir()` 一律回傳**本機路徑**（雲端是 /tmp，
-內容與 Drive 同步），所以 `generate.py` 完全不知道自己跑在哪。
+儲存層的關鍵設計：`work_dir()` 一律回傳**本機路徑**（雲端是 /tmp），
+所以 `generate.py` 完全不知道自己跑在哪。
 改 generate.py 時不要引入任何對儲存位置的假設。
+
+雲端＝`/tmp`＝**單次工作階段**。跨請求什麼都不保證留著，也沒有地方可以放，
+所以介面固定顯示「請立即下載 ZIP」。不要再設計「產完之後自動送到某處」的
+功能，除非那個「某處」不需要會過期的憑證。
 
 ## 不能違反的領域規則
 
@@ -100,26 +108,31 @@ Grafana 讀的 `gideons_goal1` 缺新財年資料（回 null），但總會
 另外：**`.gitignore` 不要用 `*.json`**。曾因此把 `vercel.json` 擋在
 repo 外，部署看似成功實則整站 404，查了三輪才發現。要擋憑證就指名擋。
 
-### Drive 授權過期 = 整站看起來壞掉（2026-08 事故）
+### 為什麼拿掉 Google Drive（2026-08）
 
-OAuth 同意畫面停在「測試中」時，Google 只發**7 天**有效的 refresh token。
+原本雲端版把 Drive 當儲存層：範本從 Drive 下載、model.json 存回 Drive。
+OAuth 同意畫面停在「測試中」時 Google 只發**7 天**有效的 refresh token，
 到期後每個要寫 Drive 的請求都 `invalid_grant`，一路冒泡成
 `Exception in ASGI application` → 前端只看得到「Internal Server Error」。
 
-處理原則，改動這一塊時別退回去：
+改成固定範本後，雲端不再需要任何憑證，也就沒有東西會過期。
+`app.py` 仍保留 `Exception → JSON 500` 的處理器：**任何端點都不該再回裸的
+"Internal Server Error"**。
 
-1. `drive._do_refresh()` 是唯一會碰到 invalid_grant 的地方，一律轉成
-   `DriveAuthExpired`（訊息含重新授權三步驟），不要讓 RefreshError 冒泡。
-2. `app.py` 註冊了 `DriveNotConfigured → 400` 與 `Exception → JSON 500`
-   兩個處理器。**任何新端點都不該再回裸的 "Internal Server Error"。**
-3. Drive 寫入失敗**不中斷流程**：`save_model` / `save_plan` / `publish`
-   先寫 /tmp，失敗只記進 `store.warnings`，由 `/api/*` 回傳、介面顯示黃字。
-   使用者仍能產出並「下載 ZIP」——但一定要看得到「沒同步」這件事。
-4. 雲端的授權狀態看**環境變數**不是檔案。舊版 `status()` 只看
-   `client_secret.json`，雲端永遠顯示「缺憑證」，其實是 token 過期。
+### 固定範本的鐵則：範本月份要從檔名讀
 
-根治只有一條：Google Cloud Console 把同意畫面**發布為正式版**，
-再重新取 token。否則每 7 天壞一次。
+`docx_utils.update_dates()` 的每一條替換都以 `meta.prev_*` 為**來源字串**
+（「7月26日」→「9月27日」）。固定範本停在某一個月（現在是 115年7月），
+若還照「上個月」推導 prev_*，來源字串一個都對不上——產出會安靜地留在舊日期，
+不會報錯。
+
+所以 `storage.template_month_of()` 從檔名解析範本月份，
+`app.resolve_template()` 再用它重建 meta。改這段時記得：
+**寧可報錯，也不要產出一份日期沒換到的報告。**
+
+範本挑選順序：① 本機上月工作資料夾（內容是上月真正送出的版本）
+② `templates/`（雲端唯一來源）。想更新雲端的起點，就把最新一組 11 份 docx
+複製進 `templates/` 並 commit。
 
 ## 安全邊界
 
@@ -127,18 +140,21 @@ OAuth 同意畫面停在「測試中」時，Google 只發**7 天**有效的 ref
   `.env` 本機用；Vercel 用平台環境變數。
 - 弱密碼判斷（auth.py）刻意用結構特徵而非清單——清單本身會洩漏密碼。
 - 測試裡不要出現實際使用的密碼。
-- `GOOGLE_REFRESH_TOKEN` 有整個 Drive 的讀寫權限，對外提及時要附警語。
 - 雲端環境未設 `APP_PASSWORD` 時回 503，這是刻意的，不要「修好」它。
+- **`templates/` 裡的 11 份 docx 含會員個資與具名健康資訊，而且刻意進版控**
+  （`.gitignore` 對它與 `贈經計畫/` 開了例外）。因此 **repo 必須維持 private**，
+  更新範本時要順手確認內容。這是拿掉 Drive 的代價，做取捨時要記得。
 - 報告內容含會員個資與**具名健康資訊**（-7 代禱項目）。任何新的對外
   輸出路徑（分享連結、公開端點、log）都要先想到這件事。
 
 ## 資料檔案位置
 
 - 本機資料：`~/Documents/海山支會/{西元年}年{M}月月例會/`（月份**不**補零）
-- Drive 資料：「月例會」資料夾下的 `{西元年}年{MM}月`（月份**補零**）
-  ——兩邊命名規則不同，混用會多開空資料夾
-- 範本 = 上月資料夾的 11 份 docx（10 份編號 + `-A.行事曆`）
-- 年度贈經計畫：`{period}_聖經配送計畫.xlsx`，整個財年固定
+- 雲端資料：`/tmp/gideons/...`，單次工作階段，用完即消失
+- 範本 = 上月資料夾的 11 份 docx（10 份編號 + `-A.行事曆`）；找不到就用
+  repo 的 `templates/`
+- 年度贈經計畫：`{period}_聖經配送計畫.xlsx`，整個財年固定。
+  `PLAN_DIRS` 依序找：本機專案旁的資料夾 →（雲端）/tmp → repo 的 `贈經計畫/`
 
 ### 任何檔案存取都要走 storage 層
 

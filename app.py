@@ -24,10 +24,8 @@ from engine import auth
 from engine import generate as gen
 from engine import grafana
 from engine.dates import build_meta, dashboard_url, default_report_month, latest_fiscal_year
-from engine.drive import (CLOUD_AUTH_HINT, DEFAULT_PARENT_ID, DriveAuthExpired,
-                          DriveClient, DriveNotConfigured)
 from engine.parse_files import SUPPORTED, parse_file
-from engine.storage import make_storage
+from engine.storage import make_storage, template_month_of
 from models.model import AFFECTED_DOCS, merge
 
 APP_DIR = Path(__file__).parent
@@ -42,46 +40,36 @@ if _env_file.exists():
             os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
 from engine import auth as _auth_probe  # noqa: E402  （需在設定路徑前判斷環境）
 
-# 雲端沒有持久磁碟，一律改用 /tmp；本機維持原本的資料夾
-if _auth_probe.is_cloud():
-    os.environ.setdefault("STORAGE", "drive")
+# 雲端只有 /tmp 可寫，而且**單次工作階段**用完就沒了。
+# 沒有任何外部儲存（Drive 已移除）：範本改用 repo 內建的固定範本，
+# 產出結果一律由使用者按「下載 ZIP」帶走。
+CLOUD = _auth_probe.is_cloud()
+if CLOUD:
     os.environ.setdefault("GIDEONS_BASE_DIR", "/tmp/gideons")
-    os.environ.setdefault("GIDEONS_CRED_DIR", "/tmp/gideons-cred")
 
 BASE_DIR = Path(os.environ.get("GIDEONS_BASE_DIR",
                                Path.home() / "Documents" / "海山支會"))
-CRED_DIR = Path(os.environ.get("GIDEONS_CRED_DIR", APP_DIR / "credentials"))
-PLAN_DIR = Path(os.environ.get("GIDEONS_PLAN_DIR",
-                               APP_DIR.parent / "贈經計畫"))
+# repo 內建：固定範本（11 份 docx）與年度贈經計畫，跟程式一起部署
+FIXED_TEMPLATE_DIR = Path(os.environ.get("GIDEONS_TEMPLATE_DIR", APP_DIR / "templates"))
+REPO_PLAN_DIR = APP_DIR / "贈經計畫"
+# 本機優先寫專案旁的資料夾；雲端只有 /tmp 可寫，repo 內的那份唯讀備用
+PLAN_DIRS = ([BASE_DIR / "贈經計畫", REPO_PLAN_DIR] if CLOUD
+             else [Path(os.environ.get("GIDEONS_PLAN_DIR", APP_DIR.parent / "贈經計畫")),
+                   REPO_PLAN_DIR])
 
-app = FastAPI(title="基甸會海山支會 月例會報告產出系統", version="1.1")
-drive = DriveClient(str(CRED_DIR), os.environ.get("GIDEONS_DRIVE_PARENT", DEFAULT_PARENT_ID))
-
-# 儲存層：local（本機資料夾）或 drive（雲端，無持久磁碟）
-STORAGE_MODE = os.environ.get("STORAGE", "drive" if auth.is_cloud() else "local")
-store = make_storage(STORAGE_MODE, BASE_DIR, drive, PLAN_DIR)
+app = FastAPI(title="基甸會海山支會 月例會報告產出系統", version="2.0")
+store = make_storage(BASE_DIR, PLAN_DIRS, FIXED_TEMPLATE_DIR)
 
 # ── 錯誤處理 ─────────────────────────────────────────────
-# Drive 授權過期屬於「設定問題」，不是伺服器壞掉。以前它會一路冒泡成
-# 500，前端只拿得到「Internal Server Error」七個字，看不出要做什麼。
 
 
 def _warnings() -> list[str]:
-    """取出儲存層這次請求累積的警告（例如 Drive 沒同步）。"""
     return store.take_warnings()
 
 
 def _detail(msg: str) -> str:
     w = _warnings()
     return msg + ("　（" + "；".join(w) + "）" if w else "")
-
-
-@app.exception_handler(DriveNotConfigured)
-async def _handle_drive(request: Request, exc: DriveNotConfigured):
-    return JSONResponse(
-        {"detail": str(exc),
-         "kind": "drive_expired" if isinstance(exc, DriveAuthExpired) else "drive"},
-        status_code=400)
 
 
 @app.exception_handler(Exception)
@@ -189,12 +177,41 @@ document.getElementById('pw').addEventListener('keydown',e=>{if(e.key==='Enter')
 
 
 # ── 共用 ─────────────────────────────────────────────────
-def _meta(year: int, month: int, meeting_date: str | None = None):
-    return build_meta(year, month, meeting_date or None)
+def _meta(year: int, month: int, meeting_date: str | None = None,
+          template_ym: tuple[int, int] | None = None):
+    return build_meta(year, month, meeting_date or None, template_ym)
+
+
+def resolve_template(year: int, month: int, meeting_date: str | None = None):
+    """決定這次要用哪一組範本，並讓 meta 的「範本月份」跟著它。
+
+    ① 上月工作資料夾（本機常態，內容是上個月真正送出的版本）
+    ② repo 內建固定範本（雲端唯一來源；停在某一個月，例如 115年7月）
+
+    ②的月份不會等於「上個月」，而 `update_dates()` 全部替換都以 meta.prev_*
+    為來源字串——所以這裡要把 meta 重建成以**實際範本月份**為準，否則會產出
+    一份日期完全沒換到的報告，而且不會報錯。
+
+    回傳 (meta, 範本路徑或 None, 來源說明)。
+    """
+    meta = _meta(year, month, meeting_date)
+    tpl = store.month_template_dir(meta)
+    if tpl is not None:
+        return meta, tpl, f"上月資料夾（{meta.prev_year}年{meta.prev_month}月）"
+
+    fixed = store.fixed_template_dir()
+    if fixed is None:
+        return meta, None, "找不到範本"
+
+    ym = template_month_of(fixed)
+    if ym and (ym[0], ym[1]) != (meta.prev_year, meta.prev_month):
+        meta = _meta(year, month, meeting_date, ym)
+    label = f"內建固定範本（{meta.prev_roc_year}年{meta.prev_month}月）"
+    return meta, fixed, label
 
 
 def _work_dir(year: int, month: int) -> Path:
-    """工作區。本機＝永久資料夾；雲端＝/tmp（內容由 Drive 同步而來）。"""
+    """工作區。本機＝永久資料夾；雲端＝/tmp，單次工作階段用完即消失。"""
     return store.work_dir(_meta(year, month))
 
 
@@ -218,29 +235,30 @@ def status(year: int | None = None, month: int | None = None):
                           "size": os.path.getsize(p),
                           "mtime": os.path.getmtime(p)})
     plan = store.find_plan(meta.period)
+    _meta_tpl, tpl_dir, tpl_label = resolve_template(y, m)
     return {
         "meta": meta.to_dict(),
-        "storage": STORAGE_MODE,
-        "base_dir": str(BASE_DIR) if STORAGE_MODE == "local" else "Google Drive",
-        "base_dir_exists": BASE_DIR.exists() if STORAGE_MODE == "local" else True,
+        "cloud": CLOUD,
+        "storage": "cloud-temp" if CLOUD else "local",
+        "base_dir": "雲端暫存區（單次工作階段）" if CLOUD else str(BASE_DIR),
+        "base_dir_exists": True if CLOUD else BASE_DIR.exists(),
         "work_dir": str(wd),
         "work_dir_exists": wd.exists(),
-        "template_dir": str(_tpl) if (_tpl := store.template_dir(meta)) else None,
-        "template_exists": _tpl is not None,
+        "template_dir": str(tpl_dir) if tpl_dir else None,
+        "template_exists": tpl_dir is not None,
+        "template_source": tpl_label,
+        "template_month": (f"{_meta_tpl.prev_roc_year}年{_meta_tpl.prev_month}月"
+                           if tpl_dir else None),
         "files": files,
         "ready": len(files),
         "latest_fiscal_year": latest_fiscal_year(),
         "dashboard_url": dashboard_url(meta.fiscal_year),
         "distribution_plan": {"path": str(plan) if plan else None,
                               "exists": plan is not None,
-                              "in_model": bool((_m := store.load_model(meta))
+                              "in_model": bool(store.load_model(meta)
                                                .get("distribution_plan", {}).get("schools")),
                               "period": meta.period,
-                              "source": "Drive「贈經計畫」資料夾"
-                                        if STORAGE_MODE == "drive"
-                                        else str(PLAN_DIR)},
-        "drive": drive.status(),
-        "storage_ready": (store.ready() if hasattr(store, "ready") else (True, "本機")),
+                              "source": "、".join(str(d) for d in PLAN_DIRS)},
         "model": store.load_model(meta) or None,
         "supported_ext": sorted(SUPPORTED),
         "warnings": _warnings(),
@@ -285,11 +303,10 @@ class InitReq(BaseModel):
 
 @app.post("/api/init")
 def api_init(req: InitReq):
-    meta = _meta(req.year, req.month, req.meeting_date)
-    tpl = store.template_dir(meta)
+    meta, tpl, tpl_label = resolve_template(req.year, req.month, req.meeting_date)
     if tpl is None:
-        raise HTTPException(
-            400, _detail(f"找不到 {meta.prev_year}年{meta.prev_month}月 的範本"))
+        raise HTTPException(400, _detail(
+            f"找不到範本：上月資料夾與內建固定範本（{FIXED_TEMPLATE_DIR}）都沒有 docx"))
     res = gen.init_month(str(_work_dir(req.year, req.month).parent), meta,
                          template_dir=str(tpl))
     if not res["ok"]:
@@ -299,6 +316,7 @@ def api_init(req: InitReq):
     store.save_model(meta, model)
     note = _ensure_plan_in_model(meta, model)
     res["meta"] = meta.to_dict()
+    res["template_source"] = tpl_label
     res["plan_note"] = note
     res["warnings"] = _warnings()
     return res
@@ -472,13 +490,12 @@ class GenReq(BaseModel):
 
 @app.post("/api/generate")
 def api_generate(req: GenReq):
-    meta = _meta(req.year, req.month, req.meeting_date)
+    meta, tpl, tpl_label = resolve_template(req.year, req.month, req.meeting_date)
     wd = _work_dir(req.year, req.month)
     if not any(wd.glob("*.docx")):
-        tpl = store.template_dir(meta)
         if tpl is None:
-            raise HTTPException(
-                400, _detail(f"找不到 {meta.prev_year}年{meta.prev_month}月 的範本"))
+            raise HTTPException(400, _detail(
+                f"找不到範本：上月資料夾與內建固定範本（{FIXED_TEMPLATE_DIR}）都沒有 docx"))
         init = gen.init_month(str(wd.parent), meta, template_dir=str(tpl))
         if not init["ok"]:
             raise HTTPException(400, init["error"])
@@ -493,14 +510,11 @@ def api_generate(req: GenReq):
         res["results"] = [r for r in res["results"] if r["num"] in req.only]
     res["meta"] = meta.to_dict()
     res["plan_note"] = plan_note
-
-    # 雲端：/tmp 不持久，產完立刻送回 Drive
-    if STORAGE_MODE == "drive":
-        try:
-            res["publish"] = store.publish(meta)
-        except Exception as exc:
-            res["publish"] = {"published": False, "error": str(exc)}
+    res["template_source"] = tpl_label
     res["warnings"] = _warnings()
+    if CLOUD:
+        # /tmp 不保證留到下一個請求，也沒有任何外部儲存可放——只能提醒帶走
+        res["warnings"] = res["warnings"] + ["雲端產出只留在本次工作階段，請立即按「下載 ZIP」帶走"]
     return res
 
 
@@ -509,8 +523,9 @@ async def api_plan_upload(year: int = Form(...), month: int = Form(...),
                           period: str = Form(""), file: UploadFile = File(...)):
     """上傳年度贈經計畫（整個財年固定的學校配送排程）。
 
-    本機存到「贈經計畫」資料夾；雲端存到 Drive 的同名資料夾——
-    該資料夾在專案之外，不會隨 repo 部署，所以雲端必須另外上傳一次。
+    本機存到專案旁的「贈經計畫」資料夾（永久保留）。
+    雲端只存得進 /tmp，**單次工作階段有效**——repo 內建的那份才是雲端常態來源，
+    所以換年度時記得把新的計畫檔一起 commit 進 `贈經計畫/`。
     """
     meta = _meta(year, month)
     period = period.strip() or meta.period
@@ -544,21 +559,11 @@ async def api_plan_upload(year: int = Form(...), month: int = Form(...),
                                   include_undated=True)
 
     return {"ok": True, "period": period, "file": os.path.basename(str(dest)),
-            "path": str(dest), "storage": STORAGE_MODE,
+            "path": str(dest), "storage": "cloud-temp" if CLOUD else "local",
             "schools": plan["schools"], "total": len(plan["schools"]),
             "this_month": this_month,
             "warnings": plan["warnings"] + _warnings(),
             "affected_docs": [5, 6]}
-
-
-@app.post("/api/publish")
-def api_publish(req: GenReq):
-    """把工作區產出送到最終位置（雲端＝上傳 Drive）。"""
-    meta = _meta(req.year, req.month)
-    try:
-        return store.publish(meta)
-    except Exception as exc:
-        raise HTTPException(502, f"發布失敗：{exc}")
 
 
 # ── API：分析檢視（事工成果表）──────────────────────────
@@ -597,41 +602,6 @@ def api_download(year: int, month: int, name: str | None = None):
         buf, media_type="application/zip",
         headers={"Content-Disposition":
                  f'attachment; filename="gideons-{year}-{month:02d}.zip"'})
-
-
-# ── API：Google Drive ────────────────────────────────────
-@app.get("/api/drive/status")
-def drive_status():
-    return drive.status()
-
-
-@app.post("/api/drive/authorize")
-def drive_authorize():
-    """本機：開瀏覽器完成 OAuth。雲端：不可能，直接說明要設哪些環境變數。"""
-    if auth.is_cloud():
-        raise HTTPException(400, CLOUD_AUTH_HINT)
-    drive.authorize(interactive=True)
-    return {"ok": True, **drive.status()}
-
-
-class UploadReq(BaseModel):
-    year: int
-    month: int
-    include_excel: bool = True
-
-
-@app.post("/api/drive/upload")
-def drive_upload(req: UploadReq):
-    meta = _meta(req.year, req.month)
-    wd = _work_dir(req.year, req.month)
-    paths = _docx_paths(wd, meta)
-    if not paths:
-        raise HTTPException(404, "尚無產出檔案可上傳")
-    if req.include_excel:
-        excel = wd / f"事工成果表_{req.year}_{req.month:02d}.xlsx"
-        if excel.exists():
-            paths.append(str(excel))
-    return drive.upload_month(paths, meta.drive_folder_name)
 
 
 # ── 前端 ─────────────────────────────────────────────────
